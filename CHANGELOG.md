@@ -16,7 +16,7 @@ No interface change. The Arc testnet deployment is unchanged.
 
 ### Reference
 
-- Tests: spend under a revoked grant and a replacement sized by the corrected rule stops at the new total; an asset whose code accepts any call passes the code check, and the spend records a debit that moved nothing.
+- Tests: spend under a revoked grant and a replacement sized by the corrected rule stops at the new total; two identical entries in one batch through MetaMask's DelegationManager v1.3.0 both spend; an asset whose code accepts any call passes the code check, and the spend records a debit that moved nothing.
 
 ## 2026-10-06
 

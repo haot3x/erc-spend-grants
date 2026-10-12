@@ -217,6 +217,24 @@ contract SpendGrantRedemptionForkTest is Test {
         }
     }
 
+    function test_fork_identicalEntriesInOneBatchBothSpend() public {
+        // Two identical entries share one record key, which has no counter. The manager runs each entry's
+        // hooks around its own execution, so the first entry's record is taken and cleared before the second
+        // is written, and both spend. Nothing in the enforcer or executor enforces that order.
+        SpendGrant memory m = _grant();
+        bytes memory sig = _sign(m);
+        IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](1);
+        chain[0] = _signedByAccount(_root(delegate, true));
+
+        vm.prank(delegate);
+        MANAGER.redeemDelegations(_two(abi.encode(chain)), _two(bytes32(0)), _two(_execution(m, sig, 1e18, recipient)));
+
+        assertEq(token.balanceOf(recipient), 2e18);
+        (uint256 spent, uint256 calls) = registry.usage(_hash(m), address(token));
+        assertEq(spent, 2e18);
+        assertEq(calls, 2);
+    }
+
     // ---------------------------------------------------------------- helpers
 
     function _grant() internal view returns (SpendGrant memory m) {
@@ -289,5 +307,17 @@ contract SpendGrantRedemptionForkTest is Test {
     function _one(bytes32 item) internal pure returns (bytes32[] memory arr) {
         arr = new bytes32[](1);
         arr[0] = item;
+    }
+
+    function _two(bytes memory item) internal pure returns (bytes[] memory arr) {
+        arr = new bytes[](2);
+        arr[0] = item;
+        arr[1] = item;
+    }
+
+    function _two(bytes32 item) internal pure returns (bytes32[] memory arr) {
+        arr = new bytes32[](2);
+        arr[0] = item;
+        arr[1] = item;
     }
 }
