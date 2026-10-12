@@ -10,12 +10,13 @@ No interface change. The Arc testnet deployment is unchanged.
 
 ### Specification
 
+- Correction, Replacing a grant: the 2026-10-06 rule sized a replacement's lifetime cap as the lesser of the requested value and what the earlier grant had left, which did not take the earlier spend off the new total, so the delegate could pass it. With `maxTotal` 1000, 700 spent, and a new total of 800, it allowed 300 more instead of 100. To hold spend under the earlier grant and the replacement to a new lifetime total `T`, a wallet now signs no more than `min(T, M) - S`, where `M` is the earlier `maxTotal` and `S` what the earlier grant spent, read once the revocation is final, and leaves the asset out when that is zero or less. Raised by ted0x on the thread.
 - Removed text that was not a requirement, a risk specific to this ERC, or the reason for a design choice, including chain-specific notes (Hedera's RPC decimals, Arbitrum's clock bounds, USDC's blocklist and `permit`), gas figures from the reference, relayer advice, and notes on accounts that can sign but cannot send transactions. Three requirements went with it: the SHOULD for relayers to cap forwarded gas, the SHOULD to keep a gas reserve where the native currency is also the spent ERC-20, and the MAY to confirm a revocation by simulating `consume`. The raw-digest note on session-key policies is also removed, and the delegation-framework paragraph in Security Considerations points to the Executor requirements instead of restating them.
 - The recommendation that a wallet confirm a listed asset answers `balanceOf` and `decimals` moves from the Rationale to Security Considerations, still a SHOULD.
 
 ### Reference
 
-- Tests: an asset whose code accepts any call passes the code check, and the spend records a debit that moved nothing.
+- Tests: spend under a revoked grant and a replacement sized by the corrected rule stops at the new total; an asset whose code accepts any call passes the code check, and the spend records a debit that moved nothing.
 
 ## 2026-10-06
 
