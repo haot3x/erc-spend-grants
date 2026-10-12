@@ -4,6 +4,19 @@ What changed in the ERC-8427 draft, its reference implementation, and the Arc te
 
 The draft is [`ERCS/erc-8427.md`](ERCS/erc-8427.md), under review in [ethereum/ERCs#2037](https://github.com/ethereum/ERCs/pull/2037). Discussion is on the [Magicians thread](https://ethereum-magicians.org/t/erc-8427-portable-spend-grants/29776).
 
+## 2026-10-12
+
+No interface change. The Arc testnet deployment is unchanged.
+
+### Specification
+
+- Removed text that was not a requirement, a risk specific to this ERC, or the reason for a design choice, including chain-specific notes (Hedera's RPC decimals, Arbitrum's clock bounds, USDC's blocklist and `permit`), gas figures from the reference, relayer advice, and notes on accounts that can sign but cannot send transactions. Three requirements went with it: the SHOULD for relayers to cap forwarded gas, the SHOULD to keep a gas reserve where the native currency is also the spent ERC-20, and the MAY to confirm a revocation by simulating `consume`. The raw-digest note on session-key policies is also removed, and the delegation-framework paragraph in Security Considerations points to the Executor requirements instead of restating them.
+- The recommendation that a wallet confirm a listed asset answers `balanceOf` and `decimals` moves from the Rationale to Security Considerations, still a SHOULD.
+
+### Reference
+
+- Tests: an asset whose code accepts any call passes the code check, and the spend records a debit that moved nothing.
+
 ## 2026-10-06
 
 Two parts: text corrections, then one interface addition and two reference decisions made ahead of the next deployment.
