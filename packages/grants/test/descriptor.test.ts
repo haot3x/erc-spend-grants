@@ -112,10 +112,11 @@ describe("ERC-7730 descriptor", () => {
     expect(ok).toBe(true);
   });
 
-  it("binds registry calldata and lists no deployment", () => {
-    // The recorded Arc testnet registry predates register and update, so the descriptor names no deployment.
+  it("binds registry calldata to the recorded deployment", () => {
+    // The descriptor names exactly the Arc testnet registry recorded in deployments/5042002.json.
+    const arc = JSON.parse(readFileSync(join(REPO_ROOT, "deployments", "5042002.json"), "utf8"));
     expect(descriptor.context.eip712).toBeUndefined();
-    expect(descriptor.context.contract.deployments).toEqual([]);
+    expect(descriptor.context.contract.deployments).toEqual([{ chainId: arc.chainId, address: arc.registry }]);
   });
 
   it("keys register and update by their exact ABI fragments", () => {

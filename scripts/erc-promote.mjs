@@ -71,7 +71,7 @@ function assetsReadme(srcFiles, testFiles) {
     "- `vectors/v1.json` — golden domain separator, struct hash, digest (the `grantId`), and canonical rendering of each grant\n" +
     "- `vectors/authorization-v1.json` — golden digest and signature for the reference executor's SpendAuthorization\n" +
     "- `clear-signing/spend-grant.json` — non-normative ERC-7730 calldata descriptor for the registry's `register` and `update`; " +
-    "it lists no deployment, because the recorded testnet deployment predates them\n" +
+    "it lists the Arc testnet registry\n" +
     `- \`src/\` — compact Solidity reference (CC0): ${srcFiles.join(", ")}\n` +
     `- \`test/\` — Foundry tests for the reference (${testFiles.join(", ")}). They import ` +
     `\`../src/\` and read vectors at \`${ASSETS_VECTOR_REL}\` when run ` +

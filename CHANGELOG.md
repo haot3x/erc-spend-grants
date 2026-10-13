@@ -6,7 +6,7 @@ The draft is [`ERCS/erc-8427.md`](ERCS/erc-8427.md), under review in [ethereum/E
 
 ## 2026-10-13
 
-**interface** Grants are registered on chain by the principal instead of signed and handed to the delegate. The delegate holds only the grant's id, the principal changes or revokes the grant by that id, and both parties list their grants and read their state from the registry. This needs a new registry. The Arc testnet deployment recorded on 2026-10-05 runs the previous design and is not replaced; no deployment of this design is recorded.
+**interface** Grants are registered on chain by the principal instead of signed and handed to the delegate. The delegate holds only the grant's id, the principal changes or revokes the grant by that id, and both parties list their grants and read their state from the registry. This needs a new registry. The Arc testnet deployment recorded on 2026-10-05 runs the previous design and stays on chain; this design is deployed beside it (see Deployment below).
 
 ### Specification
 
@@ -53,9 +53,9 @@ Superseded, with where each was stated:
 - `SpendGrantRedemptionEnforcer`: the execution must call `spend(bytes32,address,uint256,address)` on the executor; the record is keyed on `grantId`, the principal comes from `parties`, and an unknown id records nothing. `beforeHook` reverts with `WrongDelegator`, `NotRoot`, `WrongDelegate`, or `WrongRedeemer` unless the delegation is the principal's root delegation naming the grant's delegate and the redeemer is that delegate; an unknown id still records nothing and does not revert.
 - TypeScript: `revocationRegistry` becomes `registry` in types, parsing, and rendering; `SpendAuthorization.grantHash` becomes `grantId`.
 - Vectors: `v1.json` keeps the domain separator, struct hash, digest (now `grantId`), and rendering bytes (regenerated for the label), without the grant-signature fields; `authorization-v1.json` is regenerated for the new type.
-- ERC-7730 descriptor: calldata formats for `register` and `update`; `deployments` is empty.
+- ERC-7730 descriptor: calldata formats for `register` and `update`; `deployments` lists the Arc testnet registry.
 - Tests: 371 forge tests (157 before), 24 TypeScript tests (20 before), 12 fork tests on the live manager, and 15 Halmos properties with 2 canaries that must fail. New: lifecycle (every error and every update consequence), `check` order, revert encoding against the literal selector and numbers, `grantState` (each status, each bound of `spendableNow`, hostile tokens, starved gas), list pagination and spam, and a fuzzed and Halmos-proved `check`/`consume` equivalence with canaries that must fail. `SpendGrantUpdate.t.sol` replaces `SpendGrantReplacement.t.sol`: after an update to 800 with 700 spent, spending stops at 800, the window does not restart, and separate grants still stack. The invariant suite compares the registry with an independent model across `consume`, `update`, and `revoke`. Interleaving tests cover a principal revoking, lowering, pausing, or removing an asset from inside a token hook during a spend, updates inside a redemption and between the record and the execution, and re-entry into `grantState` from inside its own read; money-path tests cover replay across a chain split and a second executor, retrying accounts, calldata padding, and a delegation open to any delegate that carries the caveat, signed by an account that is also a delegate, which reverts; redemption tests, on the mock and the live manager, cover a loop from the delegate through another account and back, which pays once, and a hostile account in that loop, whose call the executor refuses before consulting any record. A mutation run over the reference found gaps that new tests close: the edges of the strict signature form (an inclusive low-s bound, exactly 65 bytes, a `v` of 27 or 28, and no ECDSA for 23-byte code that is not a designator), ERC-1271 answers that are not exactly one successful word, the library's `isValid`, `evict` dropping debits from storage, an unknown `recipientMode` with a zero recipient, a balance read that reverts with one word, the slot size at the amount bound, and the wiring each constructor checks. The ring is checked against the previous registry's ring as an oracle, and the `grantState` gas guard is swept warm and cold. The ERC-7710 matrix (8,130 cases, unchanged, and 494 strikes inside successful calls, down from 3,255 because only the two shapes that redeem the principal's root delegation to the delegate still pay; both pinned per test), the record Halmos properties against a registered grant, and the fork tests on MetaMask's DelegationManager v1.3.0 run under id keying.
-- Deployment: none. The Arc testnet registry `0x37ceecB34B97B39D5B07e8D7Dd974A5a9aD14425` and executor `0x08493Be1675070c2069a719A850f2F9d4624177E` run the previous design.
+- Deployment (Arc testnet, 5042002), both verified: registry `0xe8987A22a1e3fd4a63cB517A9476B9d214388287`, executor `0xB99785329AbEc9936b6EF6350015be39D3392646`. Registry `0x37ceecB34B97B39D5B07e8D7Dd974A5a9aD14425` and executor `0x08493Be1675070c2069a719A850f2F9d4624177E` run the previous design.
 
 ## 2026-10-12
 
@@ -128,7 +128,7 @@ Three rounds in one day: two reviewers' points from the thread, a logic review o
 
 ### Deployment (Arc testnet, 5042002)
 
-- Registry `0x37ceecB34B97B39D5B07e8D7Dd974A5a9aD14425`, executor `0x08493Be1675070c2069a719A850f2F9d4624177E`. Current.
+- Registry `0x37ceecB34B97B39D5B07e8D7Dd974A5a9aD14425`, executor `0x08493Be1675070c2069a719A850f2F9d4624177E`. Superseded on 2026-10-13.
 - Superseded the same day: registry `0x867C295d38dF1E0d6069bC0b10d1A3148C7E17d5`, executor `0x8074A7bCb5c26AD9d90E7cAC91aCF3809c40BFfd`.
 
 ## 2026-09-28
