@@ -19,7 +19,7 @@ import {
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 const UINT = /^(0|[1-9][0-9]*)$/;
 
-const ROOT_KEYS = ["chainId", "revocationRegistry", "grant"] as const;
+const ROOT_KEYS = ["chainId", "registry", "grant"] as const;
 const GRANT_KEYS = [
   "principal",
   "delegate",
@@ -115,7 +115,7 @@ function parseAssetCombine(value: unknown, path: string): AssetCombine {
 export function toSpendGrantJson(value: SpendGrantInterchange): SpendGrantJson {
   return {
     chainId: value.chainId.toString(),
-    revocationRegistry: value.revocationRegistry,
+    registry: value.registry,
     grant: {
       principal: value.grant.principal,
       delegate: value.grant.delegate,
@@ -151,7 +151,7 @@ export function validateSpendGrant(value: SpendGrantInterchange): void {
   if (value.chainId < 0n || value.chainId > UINT256_MAX) {
     throw new SpendGrantError("must fit uint256", "chainId");
   }
-  parseAddress(value.revocationRegistry, "revocationRegistry");
+  parseAddress(value.registry, "registry");
   const m = value.grant;
   parseAddress(m.principal, "grant.principal");
   parseAddress(m.delegate, "grant.delegate");
@@ -247,7 +247,7 @@ export function validateSpendGrant(value: SpendGrantInterchange): void {
 
 export function defineSpendGrant(input: {
   chainId: bigint;
-  revocationRegistry: Address;
+  registry: Address;
   grant: SpendGrant;
 }): SpendGrantInterchange {
   const result: SpendGrantInterchange = { ...input };
@@ -295,10 +295,7 @@ export function parseSpendGrant(input: string | unknown): SpendGrantInterchange 
   }
   const parsed: SpendGrantInterchange = {
     chainId: parseUint(value.chainId, 256, "chainId"),
-    revocationRegistry: parseAddress(
-      value.revocationRegistry,
-      "revocationRegistry",
-    ),
+    registry: parseAddress(value.registry, "registry"),
     grant: {
       principal: parseAddress(m.principal, "grant.principal"),
       delegate: parseAddress(m.delegate, "grant.delegate"),

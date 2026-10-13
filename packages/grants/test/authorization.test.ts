@@ -35,7 +35,7 @@ const CHAIN_ID = 31337n;
 const EXECUTOR = "0x5555555555555555555555555555555555555555" as Address;
 
 const AUTHORIZATION: SpendAuthorization = {
-  grantHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
+  grantId: "0x1111111111111111111111111111111111111111111111111111111111111111",
   asset: "0x00000000000000000000000000000000000000a0",
   amount: 123n,
   recipient: "0x3333333333333333333333333333333333333333",
@@ -73,7 +73,7 @@ function independentStructHash(a: SpendAuthorization): Hex {
         { type: "uint256" },
         { type: "uint256" },
       ],
-      [SPEND_AUTHORIZATION_TYPEHASH, a.grantHash, a.asset, a.amount, a.recipient, a.nonce, a.deadline],
+      [SPEND_AUTHORIZATION_TYPEHASH, a.grantId, a.asset, a.amount, a.recipient, a.nonce, a.deadline],
     ),
   );
 }
@@ -81,7 +81,11 @@ function independentStructHash(a: SpendAuthorization): Hex {
 describe("SpendAuthorization", () => {
   it("hashes the ERC's encodeType and reconstructs the digest independently", () => {
     expect(SPEND_AUTHORIZATION_ENCODE_TYPE).toBe(
-      "SpendAuthorization(bytes32 grantHash,address asset,uint256 amount,address recipient,uint256 nonce,uint256 deadline)",
+      "SpendAuthorization(bytes32 grantId,address asset,uint256 amount,address recipient,uint256 nonce,uint256 deadline)",
+    );
+    // A literal, because the vector file is regenerated from this code.
+    expect(SPEND_AUTHORIZATION_TYPEHASH).toBe(
+      "0xbdf12719d33aac7ffdc784c8ba01d876726bb83eb404f021efe2df09f1077b4d",
     );
     const hashes = hashSpendAuthorizationTypedData({
       chainId: CHAIN_ID,
@@ -98,6 +102,10 @@ describe("SpendAuthorization", () => {
       executor: EXECUTOR,
       authorization: AUTHORIZATION,
     });
+    // The domain did not change with the type, so its separator keeps the value the earlier vector recorded.
+    expect(hashes.domainSeparator).toBe(
+      "0xd7b8a05a0382a9f8cbfa8894f971e75d21d40ef83be94bea1847179acffef701",
+    );
     const signature = await EOA.signTypedData({
       domain,
       types: spendAuthorizationTypes,
@@ -123,7 +131,7 @@ describe("SpendAuthorization", () => {
           chainId: CHAIN_ID.toString(),
           executor: EXECUTOR,
           authorization: {
-            grantHash: AUTHORIZATION.grantHash,
+            grantId: AUTHORIZATION.grantId,
             asset: AUTHORIZATION.asset,
             amount: AUTHORIZATION.amount.toString(),
             recipient: AUTHORIZATION.recipient,

@@ -14,9 +14,10 @@ import {
   type SpendGrantInterchange,
 } from "../src/index.js";
 
-const SAMPLE = defineSpendGrant({
+/** A plain literal: the first test validates it, so a parsing change fails tests rather than the module load. */
+const SAMPLE: SpendGrantInterchange = {
   chainId: 31337n,
-  revocationRegistry: "0x4444444444444444444444444444444444444444" as Address,
+  registry: "0x4444444444444444444444444444444444444444" as Address,
   grant: {
     principal: "0x1111111111111111111111111111111111111111" as Address,
     delegate: "0x2222222222222222222222222222222222222222" as Address,
@@ -42,7 +43,7 @@ const SAMPLE = defineSpendGrant({
     validUntil: 1_800_000_000n,
     salt: 1n,
   },
-});
+};
 
 function asJson(value: SpendGrantInterchange) {
   return JSON.parse(JSON.stringify(toSpendGrantJson(value))) as ReturnType<
@@ -52,10 +53,32 @@ function asJson(value: SpendGrantInterchange) {
 
 describe("spend grant JSON parse", () => {
   it("round-trips canonical interchange JSON", () => {
+    expect(defineSpendGrant(SAMPLE)).toEqual(SAMPLE);
     const text = stringifySpendGrant(SAMPLE);
     const parsed = parseSpendGrant(text);
     expect(parsed).toEqual(SAMPLE);
     expect(parseSpendGrant(toSpendGrantJson(SAMPLE))).toEqual(SAMPLE);
+  });
+
+  it("names the registry member registry and rejects revocationRegistry", () => {
+    const json = asJson(SAMPLE);
+    expect(Object.keys(json)).toEqual(["chainId", "registry", "grant"]);
+    expect(parseSpendGrant(JSON.stringify(json)).registry).toBe(SAMPLE.registry);
+
+    const { registry, ...rest } = json;
+    expect(() =>
+      parseSpendGrant(JSON.stringify({ ...rest, revocationRegistry: registry })),
+    ).toThrow(/expected exactly chainId, grant, registry;/);
+    expect(() =>
+      parseSpendGrant(JSON.stringify({ ...json, revocationRegistry: registry })),
+    ).toThrow(SpendGrantError);
+    expect(() =>
+      defineSpendGrant({
+        chainId: SAMPLE.chainId,
+        revocationRegistry: SAMPLE.registry,
+        grant: SAMPLE.grant,
+      } as unknown as SpendGrantInterchange),
+    ).toThrow(/expected exactly chainId, grant, registry;/);
   });
 
   it("rejects extra fields", () => {
@@ -171,7 +194,7 @@ describe("spend grant JSON parse", () => {
       "1111",
       "1111",
     );
-    json.revocationRegistry = "0x4444444444444444444444444444444444444444".toUpperCase();
+    json.registry = "0x4444444444444444444444444444444444444444".toUpperCase();
     expect(() => parseSpendGrant(JSON.stringify(json))).toThrow(/lowercase/i);
   });
 

@@ -2,8 +2,7 @@
 pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {AssetLimit, NATIVE, Reason, SpendGrant, SpendGrantError} from "../../src/SpendGrantTypes.sol";
-import {SpendGrantHash} from "../../src/SpendGrantHash.sol";
+import {AssetLimit, ISpendGrantRegistry, NATIVE, Reason, SpendGrant} from "../../src/SpendGrantTypes.sol";
 import {SpendGrantRegistry} from "../../src/SpendGrantRegistry.sol";
 
 /// @dev Exposes the registry's internal helpers to the symbolic checks.
@@ -22,28 +21,76 @@ contract SymbolicRegistry is SpendGrantRegistry {
         return _unpack(word);
     }
 
-    function debitDirect(bytes32 grantHash, uint64 windowSeconds, AssetLimit memory limit, uint256 amount) external {
-        _debit(grantHash, windowSeconds, limit, NATIVE, amount);
+    /// @dev Steps 9-12 and the write for NATIVE under `grantId`, with the caps passed in. The window is the one
+    /// the grant was registered with.
+    function debitDirect(bytes32 grantId, AssetLimit memory limit, uint256 amount) external {
+        _debit(grantId, limit, NATIVE, amount);
     }
 }
 
-/// @dev Accepts every signature, so consume reaches the checks after BAD_SIGNATURE.
-contract Accept1271 {
-    function isValidSignature(bytes32, bytes calldata) external pure returns (bytes4) {
-        return 0x1626ba7e;
-    }
-}
+/// @dev Has code, so it passes the asset code check (step 8). Never called.
+contract CodeAsset {}
 
 /// @dev Halmos properties (`check_` prefix; forge test does not run them). Run with `pnpm test:symbolic`.
+/// Every grant is registered in setUp under literal parties, so every id and storage slot a check reads is
+/// concrete: with a symbolic party the slots become symbolic hashes, writes go unobserved, and a property can pass
+/// vacuously (see SpendGrantRecordSymbolic). This contract is the registry's executor.
 contract SpendGrantSymbolic is Test {
-    bytes32 internal constant GRANT = keccak256("grant");
+    bytes4 internal constant SPEND_GRANT_ERROR = bytes4(keccak256("SpendGrantError(uint8)"));
     uint256 internal constant STEPS = 2;
     uint64 internal constant WINDOW = 3600;
+    uint64 internal constant VALID_AFTER = 1_700_000_000;
+    uint64 internal constant VALID_UNTIL = 1_800_000_000;
+
+    address internal constant PRINCIPAL = address(0xA11CE);
+    address internal constant DELEGATE = address(0xB0B);
+    address internal constant DELEGATE2 = address(0xB0B2);
+    address internal constant STRANGER = address(0x5757);
+    address internal constant PAYEE = address(0xC0C);
+    /// Listed, without code: fails step 8.
+    address internal constant NO_CODE = address(0xC0DE);
+    /// Listed, holding an EIP-7702 delegation designator: fails step 8.
+    address internal constant DESIGNATED = address(0x7702);
+    /// Never listed: fails step 7.
+    address internal constant UNLISTED = address(0xD00D);
+    bytes32 internal constant UNKNOWN = keccak256("unknown grant");
 
     SymbolicRegistry internal registry;
+    address internal codeAsset;
+
+    /// Open recipient, NATIVE (1e18, 5e18, 10e18), window WINDOW; the delegate is DELEGATE (or DELEGATE2 for
+    /// `grant2`). The debit checks debit `grant`'s id directly.
+    bytes32 internal grant;
+    bytes32 internal grant2;
+    /// For check_checkMatchesConsume: a fixed payee, an open recipient with two earlier debits of `codeAsset`,
+    /// and a revoked grant, each listing `codeAsset`, NO_CODE, DESIGNATED and NATIVE.
+    bytes32 internal fixedGrant;
+    bytes32 internal openGrant;
+    bytes32 internal revokedGrant;
 
     function setUp() public {
         registry = new SymbolicRegistry(address(this));
+        codeAsset = address(new CodeAsset());
+        vm.etch(DESIGNATED, abi.encodePacked(hex"ef0100", address(0x1234)));
+
+        AssetLimit[] memory native = new AssetLimit[](1);
+        native[0] = AssetLimit(NATIVE, 1e18, 5e18, 10e18);
+        grant = _register(_terms(DELEGATE, 1, address(0), native, 1));
+        grant2 = _register(_terms(DELEGATE2, 1, address(0), native, 2));
+
+        AssetLimit[] memory four = _fourAssets();
+        fixedGrant = _register(_terms(DELEGATE, 0, PAYEE, four, 3));
+        openGrant = _register(_terms(DELEGATE, 1, address(0), four, 4));
+        revokedGrant = _register(_terms(DELEGATE, 1, address(0), four, 5));
+        vm.prank(PRINCIPAL);
+        registry.revoke(revokedGrant);
+
+        // openGrant: 100 at VALID_AFTER and 50 at VALID_AFTER + 1000 of codeAsset, whose caps are (100, 150, 200):
+        // depending on the time, the window holds 150, 50 or 0 and the lifetime has 50 left.
+        vm.warp(VALID_AFTER);
+        registry.consume(openGrant, DELEGATE, codeAsset, 100, PAYEE);
+        vm.warp(VALID_AFTER + 1000);
+        registry.consume(openGrant, DELEGATE, codeAsset, 50, PAYEE);
     }
 
     /// The code's liveness test equals the spec's primary form for every time, stamp, and window.
@@ -59,9 +106,9 @@ contract SpendGrantSymbolic is Test {
         assertEq(a, uint256(amount));
     }
 
-    /// Over any short sequence of spends and time steps, consume accepts exactly when the
-    /// spec's caps allow it (computed in exact arithmetic), reverts with the spec's reason
-    /// when they do not, and the rolling and lifetime views equal the model afterward.
+    /// Over any short sequence of spends and time steps, a debit of the registered grant is accepted exactly
+    /// when the spec's caps allow it (computed in exact arithmetic), reverts with the spec's reason when they do
+    /// not, and the rolling and lifetime views equal the model afterward.
     struct Model {
         uint64[STEPS] times;
         uint256[STEPS] amounts;
@@ -94,7 +141,7 @@ contract SpendGrantSymbolic is Test {
         }
     }
 
-    /// At full 256-bit width, a single spend is accepted exactly when the spec's caps allow it
+    /// At full 256-bit width, a single debit is accepted exactly when the spec's caps allow it
     /// in exact arithmetic, and otherwise reverts with the spec's reason.
     function check_debitMatchesCapsFullWidth(uint256 maxPerCall, uint256 maxPerWindow, uint256 maxTotal, uint256 amount)
         public
@@ -118,7 +165,7 @@ contract SpendGrantSymbolic is Test {
             expected = Reason.OVER_CUMULATIVE_CAP;
         }
 
-        try registry.debitDirect(GRANT, windowSeconds, limit, amount) {
+        try registry.debitDirect(grant, limit, amount) {
             assertTrue(expected == Reason.OK);
             m.times[m.n] = m.now_;
             m.amounts[m.n] = amount;
@@ -127,11 +174,11 @@ contract SpendGrantSymbolic is Test {
             windowSum += amount;
         } catch (bytes memory err) {
             assertTrue(expected != Reason.OK);
-            assertEq(err, abi.encodeWithSelector(SpendGrantError.selector, expected));
+            assertEq(err, abi.encodeWithSelector(SPEND_GRANT_ERROR, uint8(expected)));
         }
 
-        (uint256 spent,) = registry.usage(GRANT, NATIVE);
-        (uint256 rolling,) = registry.rollingUsage(GRANT, NATIVE);
+        (uint256 spent,) = registry.usage(grant, NATIVE);
+        (uint256 rolling,) = registry.rollingUsage(grant, NATIVE);
         assertEq(spent, m.lifetime);
         assertEq(rolling, windowSum);
         assertLe(rolling, limit.maxPerWindow);
@@ -145,49 +192,58 @@ contract SpendGrantSymbolic is Test {
         }
     }
 
-    /// Once a principal revokes a grant, no call to consume succeeds, whatever the amount or recipient.
-    function check_revokedGrantNeverConsumes(uint256 amount, address recipient) public {
-        Accept1271 principal = new Accept1271();
-        SpendGrant memory g = _grant(address(principal));
-        bytes32 grantHash = SpendGrantHash.digest(block.chainid, address(registry), g);
-
-        vm.prank(address(principal));
-        registry.revoke(grantHash);
-
-        vm.warp(g.validAfter);
-        try registry.consume(g, "", g.delegate, NATIVE, amount, recipient) {
+    /// Once the principal revokes a grant, no consume succeeds, whatever the amount, recipient or time: inside the
+    /// validity window it reverts REVOKED, outside it NOT_YET_VALID or EXPIRED.
+    function check_revokedGrantNeverConsumes(uint256 amount, address recipient, uint256 ts) public {
+        vm.prank(PRINCIPAL);
+        // A revert here would end every path before an assertion and pass vacuously.
+        try registry.revoke(grant) {}
+        catch {
+            assert(false);
+        }
+        vm.warp(ts);
+        uint8 expected = ts < VALID_AFTER ? 3 : ts >= VALID_UNTIL ? 4 : 5;
+        try registry.consume(grant, DELEGATE, NATIVE, amount, recipient) {
             assertTrue(false);
         } catch (bytes memory err) {
-            assertEq(err, abi.encodeWithSelector(SpendGrantError.selector, Reason.REVOKED));
+            assertEq(err, _err(expected));
         }
     }
 
-    /// No caller other than the executor can record a debit, for any authorizer it claims.
-    function check_onlyExecutorConsumes(address caller, address authorizer, uint256 amount, address recipient) public {
+    /// No caller other than the executor can record a debit, for any grant id and any authorizer it claims.
+    function check_onlyExecutorConsumes(
+        address caller,
+        bytes32 grantId,
+        address authorizer,
+        uint256 amount,
+        address recipient
+    ) public {
         vm.assume(caller != address(this));
-        SpendGrant memory g = _grant(address(new Accept1271()));
         vm.prank(caller);
-        try registry.consume(g, "", authorizer, NATIVE, amount, recipient) {
+        try registry.consume(grantId, authorizer, NATIVE, amount, recipient) {
             assertTrue(false);
         } catch (bytes memory err) {
-            assertEq(err, abi.encodeWithSelector(SpendGrantError.selector, Reason.UNAUTHORIZED_EXECUTOR));
+            assertEq(err, _err(12));
         }
     }
 
-    /// For any delegate, no authorizer other than that delegate can record a debit, even when the
-    /// executor (this test contract) calls. The check precedes structural validation, so it holds
-    /// for every delegate value, valid or not.
-    function check_onlyDelegateAuthorizes(address delegate, address authorizer, uint256 amount, address recipient)
-        public
-    {
-        SpendGrant memory g = _grant(address(new Accept1271()));
-        g.delegate = delegate;
-        vm.assume(authorizer != delegate);
-        vm.warp(g.validAfter);
-        try registry.consume(g, "", authorizer, NATIVE, amount, recipient) {
+    /// For either of two registered grants with different delegates, no authorizer other than that grant's
+    /// delegate can record a debit, even when the executor calls, at any time. The check precedes the validity,
+    /// revocation, payee and cap checks, so it holds whatever they would say.
+    function check_onlyDelegateAuthorizes(
+        bool second,
+        address authorizer,
+        uint256 amount,
+        address recipient,
+        uint256 ts
+    ) public {
+        bytes32 grantId = second ? grant2 : grant;
+        vm.assume(authorizer != (second ? DELEGATE2 : DELEGATE));
+        vm.warp(ts);
+        try registry.consume(grantId, authorizer, NATIVE, amount, recipient) {
             assertTrue(false);
         } catch (bytes memory err) {
-            assertEq(err, abi.encodeWithSelector(SpendGrantError.selector, Reason.UNAUTHORIZED_DELEGATE));
+            assertEq(err, _err(13));
         }
     }
 
@@ -195,16 +251,14 @@ contract SpendGrantSymbolic is Test {
     /// passes the grant's delegate as authorizer, the debit is recorded.
     function check_delegateAuthorizes(uint256 amount, address recipient) public {
         vm.assume(amount > 0 && amount <= 1e18);
-        SpendGrant memory g = _grant(address(new Accept1271()));
-        // The payee rules reject these five; mode 1 accepts every other recipient.
+        // The payee rules reject these five; an open-recipient grant accepts every other recipient.
         vm.assume(
-            recipient != address(0) && recipient != g.principal && recipient != address(registry)
+            recipient != address(0) && recipient != PRINCIPAL && recipient != address(registry)
                 && recipient != address(this) && recipient != NATIVE
         );
-        bytes32 grantHash = SpendGrantHash.digest(block.chainid, address(registry), g);
-        vm.warp(g.validAfter);
-        try registry.consume(g, "", g.delegate, NATIVE, amount, recipient) {
-            (uint256 spent, uint256 calls) = registry.usage(grantHash, NATIVE);
+        vm.warp(VALID_AFTER);
+        try registry.consume(grant, DELEGATE, NATIVE, amount, recipient) {
+            (uint256 spent, uint256 calls) = registry.usage(grant, NATIVE);
             assertEq(spent, amount);
             assertEq(calls, 1);
         } catch {
@@ -215,17 +269,75 @@ contract SpendGrantSymbolic is Test {
     /// No payee of zero, the principal, the registry, the executor, or the spent asset is ever recorded, whatever the amount.
     function check_rejectedPayeesNeverConsume(uint256 amount, uint8 which) public {
         vm.assume(which < 5);
-        SpendGrant memory g = _grant(address(new Accept1271()));
         // A branch rather than an array index: Halmos cannot read memory at a symbolic offset.
         address payee = which == 0
             ? address(0)
-            : which == 1 ? g.principal : which == 2 ? address(registry) : which == 3 ? address(this) : NATIVE;
-        vm.warp(g.validAfter);
-        try registry.consume(g, "", g.delegate, NATIVE, amount, payee) {
+            : which == 1 ? PRINCIPAL : which == 2 ? address(registry) : which == 3 ? address(this) : NATIVE;
+        vm.warp(VALID_AFTER);
+        try registry.consume(grant, DELEGATE, NATIVE, amount, payee) {
             assertTrue(false);
         } catch (bytes memory err) {
-            assertEq(err, abi.encodeWithSelector(SpendGrantError.selector, Reason.WRONG_RECIPIENT));
+            assertEq(err, _err(7));
         }
+    }
+
+    /// P-EQ: `check` returns OK exactly when `consume`, called by the executor in the same state, succeeds, and
+    /// otherwise `consume` reverts with exactly `SpendGrantError(uint8)` carrying check's reason. Over any time,
+    /// amount and recipient; the grant from {fixed payee, open recipient with earlier debits, revoked, unknown};
+    /// the authorizer from {delegate, stranger}; the asset from {listed with code, NATIVE, listed without code,
+    /// listed EIP-7702 designator, unlisted}. SpendGrantCheckCanary shows the OK branch is reached.
+    function check_checkMatchesConsume(
+        uint8 grantPick,
+        bool byStranger,
+        uint8 assetPick,
+        uint256 amount,
+        address recipient,
+        uint256 ts
+    ) public {
+        (bool checkRan, bool ok, uint8 reason, bool success, bytes memory ret) =
+            _checkThenConsume(grantPick, byStranger, assetPick, amount, recipient, ts);
+        assertTrue(checkRan);
+        assertEq(ok, reason == 0);
+        assertEq(success, ok);
+        if (success) {
+            assertEq(ret.length, 0);
+        } else {
+            assertEq(ret, abi.encodeWithSelector(SPEND_GRANT_ERROR, reason));
+        }
+    }
+
+    /// @dev check, then consume as the executor, on the same state and inputs. `check` is called low-level and
+    /// its words decoded by hand, so a revert or an out-of-range value shows as `checkRan == false` instead of
+    /// ending the path before any assertion.
+    function _checkThenConsume(
+        uint8 grantPick,
+        bool byStranger,
+        uint8 assetPick,
+        uint256 amount,
+        address recipient,
+        uint256 ts
+    ) internal returns (bool checkRan, bool ok, uint8 reason, bool success, bytes memory ret) {
+        vm.assume(grantPick < 4 && assetPick < 5);
+        // Branches rather than array indexes: Halmos cannot read memory at a symbolic offset.
+        bytes32 grantId =
+            grantPick == 0 ? fixedGrant : grantPick == 1 ? openGrant : grantPick == 2 ? revokedGrant : UNKNOWN;
+        address asset = assetPick == 0
+            ? codeAsset
+            : assetPick == 1 ? NATIVE : assetPick == 2 ? NO_CODE : assetPick == 3 ? DESIGNATED : UNLISTED;
+        address authorizer = byStranger ? STRANGER : DELEGATE;
+        vm.warp(ts);
+        (bool called, bytes memory out) = address(registry).staticcall(
+            abi.encodeCall(ISpendGrantRegistry.check, (grantId, authorizer, asset, amount, recipient))
+        );
+        if (called && out.length == 64) {
+            (uint256 okWord, uint256 reasonWord) = abi.decode(out, (uint256, uint256));
+            checkRan = okWord <= 1 && reasonWord <= 14;
+            ok = okWord == 1;
+            reason = uint8(reasonWord);
+        }
+        (success, ret) = address(registry).call(
+            abi.encodeCall(ISpendGrantRegistry.consume, (grantId, authorizer, asset, amount, recipient))
+        );
     }
 
     /// @dev `used + amount > cap` in exact (257-bit) arithmetic.
@@ -236,15 +348,43 @@ contract SpendGrantSymbolic is Test {
         }
     }
 
-    function _grant(address principal) internal pure returns (SpendGrant memory g) {
-        g.principal = principal;
-        g.delegate = address(0xB0B);
-        g.recipientMode = 1;
-        g.windowSeconds = 86400;
-        g.validAfter = 1_700_000_000;
-        g.validUntil = 1_800_000_000;
-        g.salt = 1;
-        g.assets = new AssetLimit[](1);
-        g.assets[0] = AssetLimit(NATIVE, 1e18, 5e18, 10e18);
+    /// `SpendGrantError(uint8)` carrying the literal reason number.
+    function _err(uint8 reason) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(SPEND_GRANT_ERROR, reason);
+    }
+
+    function _terms(address delegate, uint8 mode, address recipient, AssetLimit[] memory assets, uint256 salt)
+        internal
+        pure
+        returns (SpendGrant memory g)
+    {
+        g.principal = PRINCIPAL;
+        g.delegate = delegate;
+        g.recipientMode = mode;
+        g.recipient = recipient;
+        g.windowSeconds = WINDOW;
+        g.validAfter = VALID_AFTER;
+        g.validUntil = VALID_UNTIL;
+        g.salt = salt;
+        g.assets = assets;
+    }
+
+    function _register(SpendGrant memory g) internal returns (bytes32 id) {
+        vm.prank(PRINCIPAL);
+        id = registry.register(g);
+    }
+
+    /// codeAsset, NO_CODE, DESIGNATED and NATIVE, ascending, as a grant must list them.
+    function _fourAssets() internal view returns (AssetLimit[] memory list) {
+        list = new AssetLimit[](4);
+        list[0] = AssetLimit(codeAsset, 100, 150, 200);
+        list[1] = AssetLimit(NO_CODE, 100, 150, 200);
+        list[2] = AssetLimit(DESIGNATED, 100, 150, 200);
+        list[3] = AssetLimit(NATIVE, 1e18, 5e18, 10e18);
+        for (uint256 i = 1; i < 4; i++) {
+            for (uint256 j = i; j > 0 && uint160(list[j].asset) < uint160(list[j - 1].asset); j--) {
+                (list[j], list[j - 1]) = (list[j - 1], list[j]);
+            }
+        }
     }
 }

@@ -16,7 +16,7 @@ contract SpendGrantRecordCanary is SpendGrantRecordSymbolic {
         address otherEnforcer,
         bytes32 delegationHash
     ) public {
-        address recorded =
+        (, address recorded) =
             _hookPrincipal(redeemer, argDelegate, argDelegator, argAuthority, argSalt, otherEnforcer, delegationHash);
         if (recorded != address(0)) assert(false);
     }

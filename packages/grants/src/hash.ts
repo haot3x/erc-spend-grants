@@ -60,13 +60,13 @@ export interface SpendGrantHashes {
 
 export function spendGrantDomain(input: {
   chainId: bigint;
-  revocationRegistry: Address;
+  registry: Address;
 }): SpendGrantDomain {
   return {
     name: SPEND_GRANT_DOMAIN_NAME,
     version: SPEND_GRANT_DOMAIN_VERSION,
     chainId: input.chainId,
-    verifyingContract: input.revocationRegistry,
+    verifyingContract: input.registry,
   };
 }
 
@@ -111,7 +111,7 @@ export function hashAssetLimitArray(assets: readonly AssetLimit[]): Hex {
 
 export function hashSpendGrantDomain(input: {
   chainId: bigint;
-  revocationRegistry: Address;
+  registry: Address;
 }): Hex {
   return domainSeparator({ domain: spendGrantDomain(input) });
 }
@@ -145,7 +145,7 @@ export function hashSpendGrantTypedData(
     concatHex(["0x1901", domainSeparatorValue, structHash]),
   );
   if (digest !== reconstructed) {
-    throw new Error("grantHash reconstruction does not match hashTypedData");
+    throw new Error("digest reconstruction does not match hashTypedData");
   }
   return {
     domainSeparator: domainSeparatorValue,
@@ -154,6 +154,11 @@ export function hashSpendGrantTypedData(
   };
 }
 
+/**
+ * The digest of the terms: the `grantId` that registering them on `registry` would assign. After an `update`, a
+ * grant's id can differ from the digest of its current terms, which can even equal another grant's id, so do not
+ * derive a registered grant's id from them.
+ */
 export function hashSpendGrant(interchange: SpendGrantInterchange): Hex {
   return hashSpendGrantTypedData(interchange).digest;
 }
@@ -166,7 +171,7 @@ export const SPEND_AUTHORIZATION_DOMAIN_NAME = "SpendAuthorization";
 export const SPEND_AUTHORIZATION_DOMAIN_VERSION = "1";
 
 export const SPEND_AUTHORIZATION_ENCODE_TYPE =
-  "SpendAuthorization(bytes32 grantHash,address asset,uint256 amount,address recipient,uint256 nonce,uint256 deadline)";
+  "SpendAuthorization(bytes32 grantId,address asset,uint256 amount,address recipient,uint256 nonce,uint256 deadline)";
 
 export const SPEND_AUTHORIZATION_TYPEHASH = keccak256(
   toBytes(SPEND_AUTHORIZATION_ENCODE_TYPE),
@@ -174,7 +179,7 @@ export const SPEND_AUTHORIZATION_TYPEHASH = keccak256(
 
 export const spendAuthorizationTypes = {
   SpendAuthorization: [
-    { name: "grantHash", type: "bytes32" },
+    { name: "grantId", type: "bytes32" },
     { name: "asset", type: "address" },
     { name: "amount", type: "uint256" },
     { name: "recipient", type: "address" },
@@ -184,7 +189,7 @@ export const spendAuthorizationTypes = {
 } as const;
 
 export interface SpendAuthorization {
-  grantHash: Hex;
+  grantId: Hex;
   asset: Address;
   amount: bigint;
   recipient: Address;

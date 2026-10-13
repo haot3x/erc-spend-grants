@@ -40,7 +40,7 @@ export interface SpendGrant {
 
 export interface SpendGrantInterchange {
   chainId: bigint;
-  revocationRegistry: Address;
+  registry: Address;
   grant: SpendGrant;
 }
 
@@ -53,7 +53,7 @@ export interface AssetLimitJson {
 
 export interface SpendGrantJson {
   chainId: string;
-  revocationRegistry: string;
+  registry: string;
   grant: {
     principal: string;
     delegate: string;

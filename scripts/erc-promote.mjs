@@ -68,13 +68,16 @@ function rewriteVectorPath(source) {
 function assetsReadme(srcFiles, testFiles) {
   return (
     "# Assets for Portable Spend Grants\n\n" +
-    "- `vectors/v1.json` — golden hashes, rendering, and an EOA signature\n" +
+    "- `vectors/v1.json` — golden domain separator, struct hash, digest (the `grantId`), and canonical rendering of each grant\n" +
     "- `vectors/authorization-v1.json` — golden digest and signature for the reference executor's SpendAuthorization\n" +
-    "- `clear-signing/spend-grant.json` — non-normative ERC-7730 display descriptor for the reference registry deployment\n" +
+    "- `clear-signing/spend-grant.json` — non-normative ERC-7730 calldata descriptor for the registry's `register` and `update`; " +
+    "it lists no deployment, because the recorded testnet deployment predates them\n" +
     `- \`src/\` — compact Solidity reference (CC0): ${srcFiles.join(", ")}\n` +
     `- \`test/\` — Foundry tests for the reference (${testFiles.join(", ")}). They import ` +
     `\`../src/\` and read vectors at \`${ASSETS_VECTOR_REL}\` when run ` +
-    "from a Foundry project that has this directory at that path.\n\n" +
+    "from a Foundry project that has this directory at that path, with the reference's compiler settings: " +
+    "solc 0.8.28, `via_ir = true`, the optimizer at 200 runs, `evm_version = \"cancun\"`, and read access to " +
+    "`./assets` in `fs_permissions`. Without via-IR some tests do not compile.\n\n" +
     "The full reference repository, with the TypeScript package, Halmos properties, deploy script, " +
     "and Arc testnet deployment record, is https://github.com/tankcdr/erc-spend-grants.\n"
   );

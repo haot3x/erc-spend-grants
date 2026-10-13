@@ -4,7 +4,7 @@ import type { SpendGrant } from "./types.js";
 
 export interface RenderInput {
   chainId: bigint;
-  revocationRegistry: Address;
+  registry: Address;
   grant: SpendGrant;
 }
 
@@ -17,7 +17,7 @@ export function renderSpendGrant(input: RenderInput): string {
   const lines = [
     "Spend grant v1",
     `Chain: ${input.chainId}`,
-    `Revocation registry: ${addr(input.revocationRegistry)}`,
+    `Registry: ${addr(input.registry)}`,
     `Principal: ${addr(grant.principal)}`,
     `Delegate: ${addr(grant.delegate)}`,
     `Recipient mode: ${grant.recipientMode}`,

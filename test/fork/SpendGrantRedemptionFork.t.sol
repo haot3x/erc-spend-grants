@@ -2,8 +2,7 @@
 pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {AssetLimit, IERC1271, SpendGrant, SpendGrantError, Reason} from "../../src/SpendGrantTypes.sol";
-import {SpendGrantHash} from "../../src/SpendGrantHash.sol";
+import {AssetLimit, IERC1271, SpendGrant} from "../../src/SpendGrantTypes.sol";
 import {SpendGrantRegistry} from "../../src/SpendGrantRegistry.sol";
 import {SpendGrantExecutor} from "../../src/SpendGrantExecutor.sol";
 import {SpendGrantRedemptionEnforcer} from "../../src/SpendGrantRedemptionEnforcer.sol";
@@ -185,23 +184,21 @@ contract SpendGrantRedemptionForkTest is Test {
     }
 
     function test_fork_delegateRedemptionSpends() public {
-        SpendGrant memory m = _grant();
-        bytes memory sig = _sign(m);
+        bytes32 id = _register(_grant());
         IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](1);
         chain[0] = _signedByAccount(_root(delegate, true));
 
         vm.prank(delegate);
-        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(_execution(m, sig, 1e18, recipient)));
+        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(_execution(id, 1e18, recipient)));
 
         assertEq(token.balanceOf(recipient), 1e18);
-        (uint256 spent, uint256 calls) = registry.usage(_hash(m), address(token));
+        (uint256 spent, uint256 calls) = registry.usage(id, address(token));
         assertEq(spent, 1e18);
         assertEq(calls, 1);
     }
 
     function test_fork_subDelegateRedemptionIsRejected() public {
-        SpendGrant memory m = _grant();
-        bytes memory sig = _sign(m);
+        bytes32 id = _register(_grant());
         // Root: principal account -> delegate, carrying the caveat. Leaf: delegate -> subDelegate, with
         // the root's hash as its authority, signed by the delegate's key as the manager requires of an EOA.
         IDelegationManager.Delegation memory root = _signedByAccount(_root(delegate, true));
@@ -215,134 +212,208 @@ contract SpendGrantRedemptionForkTest is Test {
         chain[0] = leaf;
         chain[1] = root;
 
+        // The root's hook sees the sub-delegate as the redeemer, not the grant's delegate.
         vm.prank(subDelegate);
-        vm.expectRevert(abi.encodeWithSelector(SpendGrantError.selector, Reason.UNAUTHORIZED_DELEGATE));
-        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(_execution(m, sig, 1e18, recipient)));
+        vm.expectRevert(abi.encodeWithSelector(SpendGrantRedemptionEnforcer.WrongRedeemer.selector));
+        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(_execution(id, 1e18, recipient)));
         assertEq(token.balanceOf(recipient), 0);
     }
 
-    function test_fork_openDelegationOnlyPassesForTheDelegate() public {
-        SpendGrant memory m = _grant();
-        bytes memory sig = _sign(m);
+    function test_fork_openDelegationRevertsEvenForTheDelegate() public {
+        // The principal's root open to any delegate, carrying the caveat, does not name the grant's delegate: the
+        // hook reverts for the delegate and for anyone else.
+        bytes32 id = _register(_grant());
         IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](1);
         chain[0] = _signedByAccount(_root(MANAGER.ANY_DELEGATE(), true));
-        bytes memory execution = _execution(m, sig, 1e18, recipient);
-
-        vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(SpendGrantError.selector, Reason.UNAUTHORIZED_DELEGATE));
-        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
+        bytes memory execution = _execution(id, 1e18, recipient);
 
         vm.prank(delegate);
+        vm.expectRevert(abi.encodeWithSelector(SpendGrantRedemptionEnforcer.WrongDelegate.selector));
         MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
-        assertEq(token.balanceOf(recipient), 1e18);
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(SpendGrantRedemptionEnforcer.WrongDelegate.selector));
+        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
+    }
+
+    function test_fork_openDelegationByAPrincipalThatIsADelegateReverts() public {
+        // The money-path review's FC-1 on the live manager. The principal's account has its own grant and is also
+        // the delegate of Q's grant, which Q registered without it. It signs a delegation open to any delegate that
+        // carries the caveat. A stranger redeems it for Q's grant; under the earlier rule the hook was inert there
+        // and the account's call reached the executor as Q's delegate's direct call. The hook now reverts: the
+        // delegator is not Q's principal.
+        _register(_grant());
+        address q = vm.addr(0x0A0);
+        token.mint(q, 1e24);
+        vm.prank(q);
+        token.approve(address(executor), type(uint256).max);
+        SpendGrant memory m = _grant();
+        m.principal = q;
+        m.delegate = address(principalAccount);
+        m.recipientMode = 1;
+        m.recipient = address(0);
+        bytes32 qId = _register(m);
+        IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](1);
+        chain[0] = _signedByAccount(_root(MANAGER.ANY_DELEGATE(), true));
+        bytes memory execution = _execution(qId, 1e18, stranger);
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(SpendGrantRedemptionEnforcer.WrongDelegator.selector));
+        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
     }
 
     function test_fork_hostileIntermediaryCannotRideTheRedemption() public {
-        // The review's High, replayed on the real manager: a middle delegator that is also an enforcer on
-        // its own hop tries to spend again during the hooks. The enforcer writes nothing for it, the
-        // executor rejects it, and the whole redemption reverts.
+        // The review's High, replayed on the real manager inside a chain the rule accepts: the principal's root to the
+        // delegate carries the caveat, the delegate delegates to a middle delegator, that delegator delegates back to
+        // the delegate with itself as the enforcer, and the delegate redeems. From its beforeHook, before the root's
+        // hook writes the record, or its afterHook, after the execution took it, the middle delegator calls the
+        // executor with the same spend, as neither the grant's principal nor its delegate: the executor refuses that
+        // call itself (13), before it asks the enforcer for any record, and the whole redemption reverts with the
+        // middle delegator's StrikeRefused carrying that refusal.
         for (uint256 variant = 0; variant < 2; variant++) {
             EvilDelegator evil = new EvilDelegator(executor, variant == 0);
             SpendGrant memory m = _grant();
             m.salt = 100 + variant;
-            bytes memory sig = _sign(m);
+            bytes32 id = _register(m);
 
-            IDelegationManager.Delegation memory root = _signedByAccount(_root(address(evil), true));
+            IDelegationManager.Delegation memory root = _signedByAccount(_root(delegate, true));
+            IDelegationManager.Delegation memory middle;
+            middle.delegate = address(evil);
+            middle.delegator = delegate;
+            middle.authority = MANAGER.getDelegationHash(root);
+            middle.caveats = new IDelegationManager.Caveat[](0);
+            middle.signature = _signDelegation(DELEGATE_PK, middle);
             IDelegationManager.Delegation memory leaf;
             leaf.delegate = delegate;
             leaf.delegator = address(evil);
-            leaf.authority = MANAGER.getDelegationHash(root);
-            leaf.caveats = new IDelegationManager.Caveat[](2);
-            leaf.caveats[0] = IDelegationManager.Caveat(address(enforcer), "", "");
-            leaf.caveats[1] = IDelegationManager.Caveat(address(evil), "", "");
+            leaf.authority = MANAGER.getDelegationHash(middle);
+            leaf.caveats = new IDelegationManager.Caveat[](1);
+            leaf.caveats[0] = IDelegationManager.Caveat(address(evil), "", "");
             leaf.signature = hex"00"; // evil's ERC-1271 accepts anything
-            IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](2);
+            IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](3);
             chain[0] = leaf;
-            chain[1] = root;
+            chain[1] = middle;
+            chain[2] = root;
 
+            vm.expectCall(address(enforcer), abi.encodeWithSelector(enforcer.take.selector, address(evil)), 0);
+            // In the afterHook variant the principal's execution took the record once before evil struck, so the same
+            // prefix with the principal's account matches a real call.
+            if (variant == 1) {
+                vm.expectCall(
+                    address(enforcer), abi.encodeWithSelector(enforcer.take.selector, address(principalAccount)), 1
+                );
+            }
+            bytes memory redeem = abi.encodeCall(
+                IDelegationManager.redeemDelegations,
+                (_one(abi.encode(chain)), _one(bytes32(0)), _one(_execution(id, 1e18, recipient)))
+            );
             vm.prank(delegate);
-            vm.expectRevert(abi.encodeWithSelector(SpendGrantError.selector, Reason.UNAUTHORIZED_DELEGATE));
-            MANAGER.redeemDelegations(
-                _one(abi.encode(chain)), _one(bytes32(0)), _one(_execution(m, sig, 1e18, recipient))
+            (bool ok, bytes memory ret) = address(MANAGER).call(redeem);
+            assertFalse(ok);
+            assertEq(
+                ret,
+                abi.encodeWithSelector(
+                    EvilDelegator.StrikeRefused.selector,
+                    abi.encodeWithSelector(bytes4(keccak256("SpendGrantError(uint8)")), uint8(13))
+                )
             );
             assertEq(token.balanceOf(recipient), 0);
+            (uint256 spent, uint256 calls) = registry.usage(id, address(token));
+            assertEq(spent, 0);
+            assertEq(calls, 0);
+            assertEq(enforcer.recorded(address(principalAccount), id, address(token), 1e18, recipient), address(0));
         }
+    }
+
+    function test_fork_loopThroughAnotherAccountPays() public {
+        // The principal's root to the delegate carries the caveat, the delegate delegates to another account, that
+        // account delegates back to the delegate, and the delegate redeems. The enforcer checks the root delegation
+        // and the redeemer, not the hops between, so on the live manager too this pays once and leaves no record.
+        uint256 otherPk = 0x7777;
+        address other = vm.addr(otherPk);
+        bytes32 id = _register(_grant());
+        IDelegationManager.Delegation memory root = _signedByAccount(_root(delegate, true));
+        IDelegationManager.Delegation memory middle;
+        middle.delegate = other;
+        middle.delegator = delegate;
+        middle.authority = MANAGER.getDelegationHash(root);
+        middle.caveats = new IDelegationManager.Caveat[](0);
+        middle.signature = _signDelegation(DELEGATE_PK, middle);
+        IDelegationManager.Delegation memory leaf;
+        leaf.delegate = delegate;
+        leaf.delegator = other;
+        leaf.authority = MANAGER.getDelegationHash(middle);
+        leaf.caveats = new IDelegationManager.Caveat[](0);
+        leaf.signature = _signDelegation(otherPk, leaf);
+        IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](3);
+        chain[0] = leaf;
+        chain[1] = middle;
+        chain[2] = root;
+
+        vm.prank(delegate);
+        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(_execution(id, 1e18, recipient)));
+
+        assertEq(token.balanceOf(recipient), 1e18);
+        assertEq(token.balanceOf(address(principalAccount)), 1e24 - 1e18);
+        (uint256 spent, uint256 calls) = registry.usage(id, address(token));
+        assertEq(spent, 1e18);
+        assertEq(calls, 1);
+        assertEq(enforcer.recorded(address(principalAccount), id, address(token), 1e18, recipient), address(0));
     }
 
     function test_fork_identicalEntriesInOneBatchBothSpend() public {
         // Two identical entries share one record key, which has no counter. The manager runs each entry's
         // hooks around its own execution, so the first entry's record is taken and cleared before the second
         // is written, and both spend. Nothing in the enforcer or executor enforces that order.
-        SpendGrant memory m = _grant();
-        bytes memory sig = _sign(m);
+        bytes32 id = _register(_grant());
         IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](1);
         chain[0] = _signedByAccount(_root(delegate, true));
 
         vm.prank(delegate);
-        MANAGER.redeemDelegations(_two(abi.encode(chain)), _two(bytes32(0)), _two(_execution(m, sig, 1e18, recipient)));
+        MANAGER.redeemDelegations(_two(abi.encode(chain)), _two(bytes32(0)), _two(_execution(id, 1e18, recipient)));
 
         assertEq(token.balanceOf(recipient), 2e18);
-        (uint256 spent, uint256 calls) = registry.usage(_hash(m), address(token));
+        (uint256 spent, uint256 calls) = registry.usage(id, address(token));
         assertEq(spent, 2e18);
         assertEq(calls, 2);
     }
 
-    function test_fork_principalBelowTheRootLeavesNoRecord() public {
+    function test_fork_principalBelowTheRootReverts() public {
         // The finding that led to the root-only rule, replayed on the live manager: the delegate's own account
-        // is the root delegator, so the principal's delegation, which carries the caveat, is a lower one. A
-        // thief on the root strikes before the execution and, separately, after it, through a caveat-free
-        // delegation from the principal. The caveat is inert there, so there is no record to use: one payment.
-        for (uint256 run = 0; run < 2; run++) {
-            uint256 snap = vm.snapshotState();
-            ForkDeleGator delegateAccount = new ForkDeleGator(address(MANAGER), vm.addr(DELEGATE_PK));
-            SpendGrant memory m = _grant();
-            m.delegate = address(delegateAccount);
-            bytes memory execution = _execution(m, _sign(m), 1e18, recipient);
-            ForkRecordThief thief = new ForkRecordThief(MANAGER);
+        // is the root delegator, so the principal's delegation, which carries the caveat, is a lower one. Its
+        // hook runs first and reverts, so nothing is recorded and nothing is paid.
+        ForkDeleGator delegateAccount = new ForkDeleGator(address(MANAGER), vm.addr(DELEGATE_PK));
+        SpendGrant memory m = _grant();
+        m.delegate = address(delegateAccount);
+        bytes32 id = _register(m);
+        bytes memory execution = _execution(id, 1e18, recipient);
 
-            IDelegationManager.Delegation memory root;
-            root.delegate = address(principalAccount);
-            root.delegator = address(delegateAccount);
-            root.authority = MANAGER.ROOT_AUTHORITY();
-            root.caveats = new IDelegationManager.Caveat[](1);
-            root.caveats[0] = IDelegationManager.Caveat(address(thief), "", "");
-            root.signature = _signDelegation(DELEGATE_PK, root);
-            IDelegationManager.Delegation memory lower;
-            lower.delegate = address(delegateAccount);
-            lower.delegator = address(principalAccount);
-            lower.authority = MANAGER.getDelegationHash(root);
-            lower.caveats = new IDelegationManager.Caveat[](1);
-            lower.caveats[0] = IDelegationManager.Caveat(address(enforcer), "", "");
-            lower = _signedByAccount(lower);
-            IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](2);
-            chain[0] = lower;
-            chain[1] = root;
+        IDelegationManager.Delegation memory root;
+        root.delegate = address(principalAccount);
+        root.delegator = address(delegateAccount);
+        root.authority = MANAGER.ROOT_AUTHORITY();
+        root.caveats = new IDelegationManager.Caveat[](0);
+        root.signature = _signDelegation(DELEGATE_PK, root);
+        IDelegationManager.Delegation memory lower;
+        lower.delegate = address(delegateAccount);
+        lower.delegator = address(principalAccount);
+        lower.authority = MANAGER.getDelegationHash(root);
+        lower.caveats = new IDelegationManager.Caveat[](1);
+        lower.caveats[0] = IDelegationManager.Caveat(address(enforcer), "", "");
+        lower = _signedByAccount(lower);
+        IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](2);
+        chain[0] = lower;
+        chain[1] = root;
 
-            IDelegationManager.Delegation[] memory nested = new IDelegationManager.Delegation[](1);
-            nested[0] = _signedByAccount(_root(address(thief), false));
-            thief.arm(run == 0, abi.encode(nested), execution);
-
-            vm.prank(address(delegateAccount));
-            MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
-
-            assertTrue(thief.struck());
-            assertFalse(thief.nestedSpent());
-            // It reached the executor and failed for want of a record, not for some unrelated reason.
-            assertEq(
-                thief.nestedError(), abi.encodeWithSelector(SpendGrantError.selector, Reason.UNAUTHORIZED_DELEGATE)
-            );
-            (uint256 spent, uint256 calls) = registry.usage(_hash(m), address(token));
-            assertEq(calls, 1);
-            assertEq(spent, 1e18);
-            vm.revertToState(snap);
-        }
+        vm.prank(address(delegateAccount));
+        vm.expectRevert(abi.encodeWithSelector(SpendGrantRedemptionEnforcer.NotRoot.selector));
+        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
     }
 
     function test_fork_rootCarryingTheCaveatTwiceReverts() public {
         // A thief between two copies of the caveat on the principal's root could take the first record before the
         // second copy writes it again; a root that carries the caveat twice is rejected outright.
-        SpendGrant memory m = _grant();
-        bytes memory execution = _execution(m, _sign(m), 1e18, recipient);
+        bytes memory execution = _execution(_register(_grant()), 1e18, recipient);
         ForkRecordThief thief = new ForkRecordThief(MANAGER);
         IDelegationManager.Delegation memory root = _root(delegate, true);
         IDelegationManager.Caveat[] memory caveats = new IDelegationManager.Caveat[](3);
@@ -363,12 +434,12 @@ contract SpendGrantRedemptionForkTest is Test {
 
     function test_fork_delegationCarryingTheCaveatCannotRideTheRecord() public {
         // A thief after the caveat on the principal's root redeems a delegation from the principal to itself that
-        // also carries the caveat. Without args that delegation reverts; with them it records the thief, whom
-        // consume rejects, and its revert restores the delegate's record. Either way: one payment.
+        // also carries the caveat. With args that delegation names the thief, not the grant's delegate, and
+        // reverts; without them it reverts too. Either way the delegate's record is untouched: one payment.
         for (uint256 run = 0; run < 2; run++) {
             uint256 snap = vm.snapshotState();
-            SpendGrant memory m = _grant();
-            bytes memory execution = _execution(m, _sign(m), 1e18, recipient);
+            bytes32 id = _register(_grant());
+            bytes memory execution = _execution(id, 1e18, recipient);
             ForkRecordThief thief = new ForkRecordThief(MANAGER);
             IDelegationManager.Delegation memory root = _root(delegate, true);
             IDelegationManager.Caveat[] memory caveats = new IDelegationManager.Caveat[](2);
@@ -388,18 +459,38 @@ contract SpendGrantRedemptionForkTest is Test {
 
             assertTrue(thief.struck());
             assertFalse(thief.nestedSpent());
-            // With args the thief's delegation records the thief, whom consume rejects; without them it reverts.
+            // With args the thief's delegation names the thief rather than the grant's delegate; without them it
+            // cannot show it is the root.
             assertEq(
                 thief.nestedError(),
                 run == 0
-                    ? abi.encodeWithSelector(SpendGrantError.selector, Reason.UNAUTHORIZED_DELEGATE)
+                    ? abi.encodeWithSelector(SpendGrantRedemptionEnforcer.WrongDelegate.selector)
                     : abi.encodeWithSelector(SpendGrantRedemptionEnforcer.MissingDelegation.selector)
             );
-            (uint256 spent, uint256 calls) = registry.usage(_hash(m), address(token));
+            (uint256 spent, uint256 calls) = registry.usage(id, address(token));
             assertEq(calls, 1);
             assertEq(spent, 1e18);
             vm.revertToState(snap);
         }
+    }
+
+    function test_fork_unknownGrantIdIsNonexistent() public {
+        // The delegate redeems the principal's root, which carries the caveat, for a spend of an id the registry
+        // does not know. On the live manager too, the hook neither records nor reverts, so the execution runs, and
+        // the redemption reverts with the executor's NONEXISTENT (14), not with any error of the enforcer's.
+        SpendGrant memory m = _grant();
+        _register(m);
+        m.salt = 2;
+        bytes32 unknown = registry.hashGrant(m);
+        (address unknownPrincipal,) = registry.parties(unknown);
+        assertEq(unknownPrincipal, address(0), "the unknown id is registered");
+        IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](1);
+        chain[0] = _signedByAccount(_root(delegate, true));
+        bytes memory execution = _execution(unknown, 1e18, recipient);
+
+        vm.prank(delegate);
+        vm.expectRevert(abi.encodeWithSelector(bytes4(keccak256("SpendGrantError(uint8)")), uint8(14)));
+        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
     }
 
     // ---------------------------------------------------------------- helpers
@@ -418,24 +509,16 @@ contract SpendGrantRedemptionForkTest is Test {
         m.assets[0] = AssetLimit(address(token), 1e18, 10e18, 100e18);
     }
 
-    function _hash(SpendGrant memory m) internal view returns (bytes32) {
-        return SpendGrantHash.digest(block.chainid, address(registry), m);
+    /// @dev Registers the terms from their principal, the DeleGator account, as `register` requires; returns the id.
+    function _register(SpendGrant memory m) internal returns (bytes32 id) {
+        vm.prank(m.principal);
+        id = registry.register(m);
     }
 
-    function _sign(SpendGrant memory m) internal view returns (bytes memory) {
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(OWNER_PK, _hash(m));
-        return abi.encodePacked(r, s, v);
-    }
-
-    function _execution(SpendGrant memory m, bytes memory sig, uint256 amount, address to)
-        internal
-        view
-        returns (bytes memory)
-    {
+    /// @dev ERC-7579 single execution targeting the executor's `spend(grantId, asset, amount, recipient)`.
+    function _execution(bytes32 id, uint256 amount, address to) internal view returns (bytes memory) {
         return abi.encodePacked(
-            address(executor),
-            uint256(0),
-            abi.encodeCall(SpendGrantExecutor.spend, (m, sig, address(token), amount, to))
+            address(executor), uint256(0), abi.encodeCall(SpendGrantExecutor.spend, (id, address(token), amount, to))
         );
     }
 

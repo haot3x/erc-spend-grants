@@ -10,7 +10,6 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
 
 import {
   ASSET_COMBINE_AND,
@@ -23,14 +22,11 @@ import {
   hashSpendGrantTypedData,
   SPEND_GRANT_ENCODE_TYPE,
   SPEND_GRANT_TYPEHASH,
-  spendGrantDomain,
-  spendGrantTypes,
   parseSpendGrant,
   RECIPIENT_MODE_ANY,
   RECIPIENT_MODE_LOCKED,
   renderSpendGrant,
   toSpendGrantJson,
-  toSpendGrantTypedData,
   NATIVE_ADDRESS,
   ZERO_ADDRESS,
   type SpendGrant,
@@ -54,27 +50,65 @@ const TOKEN_A =
 const VECTOR_NAMES = [
   "one-asset-locked-recipient",
   "two-asset-and-native-erc20",
-  "eoa-signed",
+  "eoa-principal",
 ] as const;
 
-/** Anvil account 0. Evidence only; not a trusted deployment. */
-const EOA_KEY =
-  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" as const;
-const EOA = privateKeyToAccount(EOA_KEY);
-const EOA_ADDRESS = EOA.address.toLowerCase() as Address;
+/** Anvil account 0's address. */
+const EOA_ADDRESS =
+  "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266" as Address;
+
+/**
+ * Literals, because the vector file is regenerated from this code: these pins are what stop a change to the
+ * typed data from passing unnoticed. Renaming the registry member and its rendering label left them unchanged.
+ */
+const DOMAIN_SEPARATOR =
+  "0x1040f75f67e75ef60a477f90720cc26434a4d3c1b0cb792b9acfbb39e591eeae";
+const PINNED: Record<
+  (typeof VECTOR_NAMES)[number],
+  { structHash: Hex; digest: Hex }
+> = {
+  "one-asset-locked-recipient": {
+    structHash:
+      "0x17dc908df6dec4fbe8d92184a25919ecbdf0f3bf23161690485d8ab8f4516b9c",
+    digest:
+      "0x04c4583db88be0bb60d71e9e0ec4b6cc40378ba6dff9f2a58e19b4174fc09139",
+  },
+  "two-asset-and-native-erc20": {
+    structHash:
+      "0x3c6e2a0234ae1388d45cf2dc9366a3b90daa55369a60df508c8af27cef425746",
+    digest:
+      "0x7940d957c8919d08655e7a894510946917e532518a74318d50fbdec066d1347b",
+  },
+  "eoa-principal": {
+    structHash:
+      "0xeba170ad875d976128725374770856b70085f42ad64f535bfc0b6e18008f2a64",
+    digest:
+      "0xdefd61fdb6eed8eeaaae1fa664a787e955aed6a26771426467973ee0ac504890",
+  },
+};
 
 interface GoldenVector {
   name: string;
   chainId: string;
-  revocationRegistry: string;
+  registry: string;
   grant: Record<string, unknown>;
   domainSeparator: Hex;
   structHash: Hex;
   digest: Hex;
   rendering: string;
-  signature?: Hex;
-  signer?: Address;
 }
+
+/** Every member of a vector, in file order. No grant signature: grants are registered, not signed. */
+const VECTOR_KEYS = [
+  "name",
+  "chainId",
+  "registry",
+  "grant",
+  "domainSeparator",
+  "structHash",
+  "digest",
+  "rendering",
+];
 
 interface VectorFile {
   version: number;
@@ -96,7 +130,7 @@ function fixtures(): Record<(typeof VECTOR_NAMES)[number], SpendGrantInterchange
   return {
     "one-asset-locked-recipient": defineSpendGrant({
       chainId: CHAIN_ID,
-      revocationRegistry: REGISTRY,
+      registry: REGISTRY,
       grant: {
         principal: PRINCIPAL,
         delegate: DELEGATE,
@@ -112,7 +146,7 @@ function fixtures(): Record<(typeof VECTOR_NAMES)[number], SpendGrantInterchange
     }),
     "two-asset-and-native-erc20": defineSpendGrant({
       chainId: CHAIN_ID,
-      revocationRegistry: REGISTRY,
+      registry: REGISTRY,
       grant: {
         principal: PRINCIPAL,
         delegate: DELEGATE,
@@ -129,9 +163,9 @@ function fixtures(): Record<(typeof VECTOR_NAMES)[number], SpendGrantInterchange
         salt: 2n,
       },
     }),
-    "eoa-signed": defineSpendGrant({
+    "eoa-principal": defineSpendGrant({
       chainId: CHAIN_ID,
-      revocationRegistry: REGISTRY,
+      registry: REGISTRY,
       grant: {
         principal: EOA_ADDRESS,
         delegate: DELEGATE,
@@ -212,7 +246,7 @@ function goldenFromInterchange(
   return {
     name,
     chainId: json.chainId,
-    revocationRegistry: json.revocationRegistry,
+    registry: json.registry,
     grant: json.grant,
     domainSeparator: hashes.domainSeparator,
     structHash: hashes.structHash,
@@ -221,34 +255,23 @@ function goldenFromInterchange(
   };
 }
 
-async function generateVectorFile(): Promise<VectorFile> {
+function generateVectorFile(): VectorFile {
   const generated = fixtures();
-  const vectors: GoldenVector[] = [];
-  for (const name of VECTOR_NAMES) {
-    const vector = goldenFromInterchange(name, generated[name]);
-    if (name === "eoa-signed") {
-      vector.signer = EOA_ADDRESS;
-      vector.signature = await EOA.signTypedData({
-        domain: spendGrantDomain(generated[name]),
-        types: spendGrantTypes,
-        primaryType: "SpendGrant",
-        message: toSpendGrantTypedData(generated[name].grant),
-      });
-    }
-    vectors.push(vector);
-  }
   return {
     version: 1,
     encodeType: SPEND_GRANT_ENCODE_TYPE,
     domain: { name: "SpendGrant", version: "1" },
-    vectors,
+    vectors: VECTOR_NAMES.map((name) =>
+      goldenFromInterchange(name, generated[name]),
+    ),
   };
 }
 
-async function loadOrWriteVectors(): Promise<VectorFile> {
+/** Writes vectors/v1.json from this code when the file is absent (delete it to regenerate); otherwise reads it. */
+function loadOrWriteVectors(): VectorFile {
   if (!existsSync(VECTOR_PATH)) {
     mkdirSync(dirname(VECTOR_PATH), { recursive: true });
-    const generated = await generateVectorFile();
+    const generated = generateVectorFile();
     writeFileSync(VECTOR_PATH, `${JSON.stringify(generated, null, 2)}\n`);
     return generated;
   }
@@ -279,17 +302,47 @@ describe("spend grant hashing", () => {
     expect(SPEND_GRANT_TYPEHASH).toBe(keccak256(toBytes(SPEND_GRANT_ENCODE_TYPE)));
   });
 
-  it("matches golden vectors and independent EIP-712 reconstruction", async () => {
-    const file = await loadOrWriteVectors();
+  it("renders the ERC's labels exactly", () => {
+    expect(renderSpendGrant(fixtures()["one-asset-locked-recipient"])).toBe(
+      [
+        "Spend grant v1",
+        "Chain: 31337",
+        "Registry: 0x4444444444444444444444444444444444444444",
+        "Principal: 0x1111111111111111111111111111111111111111",
+        "Delegate: 0x2222222222222222222222222222222222222222",
+        "Recipient mode: 0",
+        "Recipient: 0x3333333333333333333333333333333333333333",
+        "Asset combine: 0",
+        "Window seconds: 86400",
+        "Budget count: 1",
+        "Budget 0 asset: 0x00000000000000000000000000000000000000a0",
+        "Budget 0 maximum per call (raw units): 10",
+        "Budget 0 maximum per window (raw units): 100",
+        "Budget 0 maximum total (raw units): 1000",
+        "Valid after (inclusive Unix seconds): 1700000000",
+        "Valid until (exclusive Unix seconds): 1800000000",
+        "Salt: 1",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("matches golden vectors and independent EIP-712 reconstruction", () => {
+    const file = loadOrWriteVectors();
     expect(file.encodeType).toBe(SPEND_GRANT_ENCODE_TYPE);
     expect(file.vectors.map((vector) => vector.name)).toEqual([...VECTOR_NAMES]);
 
     const generated = fixtures();
     for (const vector of file.vectors) {
+      expect(Object.keys(vector)).toEqual(VECTOR_KEYS);
+      const pinned = PINNED[vector.name as (typeof VECTOR_NAMES)[number]];
+      expect(vector.domainSeparator).toBe(DOMAIN_SEPARATOR);
+      expect(vector.structHash).toBe(pinned.structHash);
+      expect(vector.digest).toBe(pinned.digest);
       const interchange = parseSpendGrant(
         JSON.stringify({
           chainId: vector.chainId,
-          revocationRegistry: vector.revocationRegistry,
+          registry: vector.registry,
           grant: vector.grant,
         }),
       );
@@ -335,10 +388,6 @@ describe("spend grant hashing", () => {
       const local = generated[vector.name as (typeof VECTOR_NAMES)[number]];
       expect(hashSpendGrant(local)).toBe(vector.digest);
       expect(renderSpendGrant(local)).toBe(vector.rendering);
-      if (vector.name === "eoa-signed") {
-        expect(vector.signer).toBe(EOA_ADDRESS);
-        expect(vector.signature).toMatch(/^0x[0-9a-f]{130}$/);
-      }
     }
   });
 
