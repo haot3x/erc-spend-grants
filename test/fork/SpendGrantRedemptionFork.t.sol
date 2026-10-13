@@ -80,6 +80,58 @@ contract ForkDeleGator {
     }
 }
 
+/// @dev Sits on a delegation and, at one chosen hook, tries to spend again: it redeems a caveat-free delegation
+/// from the principal whose execution is the same spend, and catches whatever that does.
+contract ForkRecordThief {
+    IDelegationManager internal immutable MANAGER;
+    bool internal inBefore;
+    bool public struck;
+    bool public nestedSpent;
+    bytes public nestedError;
+    bytes internal nestedContext;
+    bytes internal nestedExecution;
+
+    constructor(IDelegationManager manager_) {
+        MANAGER = manager_;
+    }
+
+    function arm(bool inBefore_, bytes memory context, bytes memory execution) external {
+        (inBefore, struck, nestedSpent, nestedContext, nestedExecution) = (inBefore_, false, false, context, execution);
+        nestedError = "";
+    }
+
+    function beforeAllHook(bytes calldata, bytes calldata, bytes32, bytes calldata, bytes32, address, address)
+        external
+    {}
+
+    function afterAllHook(bytes calldata, bytes calldata, bytes32, bytes calldata, bytes32, address, address)
+        external
+    {}
+
+    function beforeHook(bytes calldata, bytes calldata, bytes32, bytes calldata, bytes32, address, address) external {
+        if (inBefore) _strike();
+    }
+
+    function afterHook(bytes calldata, bytes calldata, bytes32, bytes calldata, bytes32, address, address) external {
+        if (!inBefore) _strike();
+    }
+
+    function _strike() internal {
+        if (struck) return;
+        struck = true;
+        bytes[] memory contexts = new bytes[](1);
+        contexts[0] = nestedContext;
+        bytes32[] memory modes = new bytes32[](1);
+        bytes[] memory executions = new bytes[](1);
+        executions[0] = nestedExecution;
+        try MANAGER.redeemDelegations(contexts, modes, executions) {
+            nestedSpent = true;
+        } catch (bytes memory err) {
+            nestedError = err;
+        }
+    }
+}
+
 /// @notice Drives the redemption enforcer and executor through MetaMask's DelegationManager v1.3.0 as
 /// deployed on Arc testnet, instead of the mock manager the unit tests use. It confirms the mock's three
 /// assumptions on the real contract: the caller of redeemDelegations is what the hooks see as redeemer,
@@ -235,6 +287,121 @@ contract SpendGrantRedemptionForkTest is Test {
         assertEq(calls, 2);
     }
 
+    function test_fork_principalBelowTheRootLeavesNoRecord() public {
+        // The finding that led to the root-only rule, replayed on the live manager: the delegate's own account
+        // is the root delegator, so the principal's delegation, which carries the caveat, is a lower one. A
+        // thief on the root strikes before the execution and, separately, after it, through a caveat-free
+        // delegation from the principal. The caveat is inert there, so there is no record to use: one payment.
+        for (uint256 run = 0; run < 2; run++) {
+            uint256 snap = vm.snapshotState();
+            ForkDeleGator delegateAccount = new ForkDeleGator(address(MANAGER), vm.addr(DELEGATE_PK));
+            SpendGrant memory m = _grant();
+            m.delegate = address(delegateAccount);
+            bytes memory execution = _execution(m, _sign(m), 1e18, recipient);
+            ForkRecordThief thief = new ForkRecordThief(MANAGER);
+
+            IDelegationManager.Delegation memory root;
+            root.delegate = address(principalAccount);
+            root.delegator = address(delegateAccount);
+            root.authority = MANAGER.ROOT_AUTHORITY();
+            root.caveats = new IDelegationManager.Caveat[](1);
+            root.caveats[0] = IDelegationManager.Caveat(address(thief), "", "");
+            root.signature = _signDelegation(DELEGATE_PK, root);
+            IDelegationManager.Delegation memory lower;
+            lower.delegate = address(delegateAccount);
+            lower.delegator = address(principalAccount);
+            lower.authority = MANAGER.getDelegationHash(root);
+            lower.caveats = new IDelegationManager.Caveat[](1);
+            lower.caveats[0] = IDelegationManager.Caveat(address(enforcer), "", "");
+            lower = _signedByAccount(lower);
+            IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](2);
+            chain[0] = lower;
+            chain[1] = root;
+
+            IDelegationManager.Delegation[] memory nested = new IDelegationManager.Delegation[](1);
+            nested[0] = _signedByAccount(_root(address(thief), false));
+            thief.arm(run == 0, abi.encode(nested), execution);
+
+            vm.prank(address(delegateAccount));
+            MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
+
+            assertTrue(thief.struck());
+            assertFalse(thief.nestedSpent());
+            // It reached the executor and failed for want of a record, not for some unrelated reason.
+            assertEq(
+                thief.nestedError(), abi.encodeWithSelector(SpendGrantError.selector, Reason.UNAUTHORIZED_DELEGATE)
+            );
+            (uint256 spent, uint256 calls) = registry.usage(_hash(m), address(token));
+            assertEq(calls, 1);
+            assertEq(spent, 1e18);
+            vm.revertToState(snap);
+        }
+    }
+
+    function test_fork_rootCarryingTheCaveatTwiceReverts() public {
+        // A thief between two copies of the caveat on the principal's root could take the first record before the
+        // second copy writes it again; a root that carries the caveat twice is rejected outright.
+        SpendGrant memory m = _grant();
+        bytes memory execution = _execution(m, _sign(m), 1e18, recipient);
+        ForkRecordThief thief = new ForkRecordThief(MANAGER);
+        IDelegationManager.Delegation memory root = _root(delegate, true);
+        IDelegationManager.Caveat[] memory caveats = new IDelegationManager.Caveat[](3);
+        caveats[0] = root.caveats[0];
+        caveats[1] = IDelegationManager.Caveat(address(thief), "", "");
+        caveats[2] = IDelegationManager.Caveat(address(enforcer), "", "");
+        root.caveats = caveats;
+        IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](1);
+        chain[0] = _signedByAccount(root);
+        IDelegationManager.Delegation[] memory nested = new IDelegationManager.Delegation[](1);
+        nested[0] = _signedByAccount(_root(address(thief), false));
+        thief.arm(true, abi.encode(nested), execution);
+
+        vm.prank(delegate);
+        vm.expectRevert(SpendGrantRedemptionEnforcer.CaveatNotOnce.selector);
+        MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
+    }
+
+    function test_fork_delegationCarryingTheCaveatCannotRideTheRecord() public {
+        // A thief after the caveat on the principal's root redeems a delegation from the principal to itself that
+        // also carries the caveat. Without args that delegation reverts; with them it records the thief, whom
+        // consume rejects, and its revert restores the delegate's record. Either way: one payment.
+        for (uint256 run = 0; run < 2; run++) {
+            uint256 snap = vm.snapshotState();
+            SpendGrant memory m = _grant();
+            bytes memory execution = _execution(m, _sign(m), 1e18, recipient);
+            ForkRecordThief thief = new ForkRecordThief(MANAGER);
+            IDelegationManager.Delegation memory root = _root(delegate, true);
+            IDelegationManager.Caveat[] memory caveats = new IDelegationManager.Caveat[](2);
+            caveats[0] = root.caveats[0];
+            caveats[1] = IDelegationManager.Caveat(address(thief), "", "");
+            root.caveats = caveats;
+            IDelegationManager.Delegation[] memory chain = new IDelegationManager.Delegation[](1);
+            chain[0] = _signedByAccount(root);
+
+            IDelegationManager.Delegation[] memory nested = new IDelegationManager.Delegation[](1);
+            nested[0] = _signedByAccount(_root(address(thief), true));
+            if (run == 1) nested[0].caveats[0].args = "";
+            thief.arm(true, abi.encode(nested), execution);
+
+            vm.prank(delegate);
+            MANAGER.redeemDelegations(_one(abi.encode(chain)), _one(bytes32(0)), _one(execution));
+
+            assertTrue(thief.struck());
+            assertFalse(thief.nestedSpent());
+            // With args the thief's delegation records the thief, whom consume rejects; without them it reverts.
+            assertEq(
+                thief.nestedError(),
+                run == 0
+                    ? abi.encodeWithSelector(SpendGrantError.selector, Reason.UNAUTHORIZED_DELEGATE)
+                    : abi.encodeWithSelector(SpendGrantRedemptionEnforcer.MissingDelegation.selector)
+            );
+            (uint256 spent, uint256 calls) = registry.usage(_hash(m), address(token));
+            assertEq(calls, 1);
+            assertEq(spent, 1e18);
+            vm.revertToState(snap);
+        }
+    }
+
     // ---------------------------------------------------------------- helpers
 
     function _grant() internal view returns (SpendGrant memory m) {
@@ -289,6 +456,26 @@ contract SpendGrantRedemptionForkTest is Test {
         returns (IDelegationManager.Delegation memory)
     {
         d.signature = _signDelegation(OWNER_PK, d);
+        return _withEnforcerArgs(d);
+    }
+
+    /// @dev Puts the delegation into the args of its SpendGrant caveats, so the enforcer can check that it is
+    /// the root. Args are not part of the delegation hash, so the signature still holds.
+    function _withEnforcerArgs(IDelegationManager.Delegation memory d)
+        internal
+        view
+        returns (IDelegationManager.Delegation memory)
+    {
+        bytes memory signature = d.signature;
+        d.signature = ""; // not part of the hash, so not needed in args
+        for (uint256 c = 0; c < d.caveats.length; c++) {
+            if (d.caveats[c].enforcer == address(enforcer)) d.caveats[c].args = "";
+        }
+        bytes memory self = abi.encode(d);
+        d.signature = signature;
+        for (uint256 c = 0; c < d.caveats.length; c++) {
+            if (d.caveats[c].enforcer == address(enforcer)) d.caveats[c].args = self;
+        }
         return d;
     }
 
