@@ -161,7 +161,7 @@ contract SpendGrantX402Test is Test {
         assertEq(usdc.balanceOf(serverA), 0);
     }
 
-    function test_treasuryShortfallIsInsufficientFunds() public {
+    function test_allowanceShortfallIsInsufficientFunds() public {
         Requirements memory req = _requirements(serverA, 0.5e6);
         Payment memory pay = _pay(req, 1);
         vm.prank(principal);
