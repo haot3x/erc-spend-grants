@@ -4,6 +4,11 @@ What changed in the ERC-8427 draft, its reference implementation, and the Arc te
 
 The draft is [`ERCS/erc-8427.md`](ERCS/erc-8427.md), under review in [ethereum/ERCs#2037](https://github.com/ethereum/ERCs/pull/2037). Discussion is on the [Magicians thread](https://ethereum-magicians.org/t/erc-8427-portable-spend-grants/29776).
 
+## 2026-10-14
+
+- Integration tests: `test/integrations/x402/` settles x402 payments under a registered grant through `SpendGrantAuthorizationExecutor`, with a proposed mapping of x402's payment requirements, payload, and error codes. No change to the draft or the contracts; the tests are not copied into the ERC bundle.
+- The README lists integrations others have built against the reference.
+
 ## 2026-10-13
 
 **interface** Grants are registered on chain by the principal instead of signed and handed to the delegate. The delegate holds only the grant's id, the principal changes or revokes the grant by that id, and both parties list their grants and read their state from the registry. This needs a new registry. The Arc testnet deployment recorded on 2026-10-05 runs the previous design and stays on chain; this design is deployed beside it (see Deployment below).

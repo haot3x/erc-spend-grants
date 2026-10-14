@@ -39,9 +39,14 @@ The reference ships three executors. Each takes a `grantId` and reads the grant'
 | Solidity reference                    | [`src/`](src/), tests in [`test/`](test/)                                                                         |
 | TypeScript hashing / rendering / JSON | [`packages/grants/`](packages/grants/)                                                                           |
 | ERC-7730 display descriptor           | [`descriptors/spend-grant.erc7730.json`](descriptors/spend-grant.erc7730.json)                                   |
+| Integration tests                     | [`test/integrations/`](test/integrations/): [x402](test/integrations/x402/) payments settled under a grant                       |
 | Deployments                           | [`deployments/`](deployments/) (Arc testnet: registry `0xe8987A22a1e3fd4a63cB517A9476B9d214388287`, executor `0xB99785329AbEc9936b6EF6350015be39D3392646`) |
 
 Neighboring standards (ERC-7710, 7715, 8226, and the bounded-agent-actions draft) are cited in the Rationale.
+
+Integrations built by others against this reference:
+
+- [haot3x/agent-order-amendments](https://github.com/haot3x/agent-order-amendments/blob/d73681f932c4bfe7b140ff4d99f99d4f426f9acc/ERC8427.md): an ERC-8001 order-amendment profile that funds agreed price changes through the registry and direct executor, pinned at `d70b04c`.
 
 What changed and when, including which changes need a new registry, is in [`CHANGELOG.md`](CHANGELOG.md).
 
