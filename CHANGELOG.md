@@ -8,6 +8,7 @@ The draft is [`ERCS/erc-8427.md`](ERCS/erc-8427.md), under review in [ethereum/E
 
 - Integration tests: `test/integrations/x402/` settles x402 payments under a registered grant through `SpendGrantAuthorizationExecutor`, with a proposed mapping of x402's payment requirements, payload, and error codes. No change to the draft or the contracts; the tests are not copied into the ERC bundle.
 - The README lists integrations others have built against the reference.
+- Integration tests: `test/integrations/safe/` runs Safe v1.4.1 on Arc testnet against the deployed registry and executor, with a 2-of-3 Safe registering, updating, and revoking as principal and a 2-of-2 Safe authorizing spends as delegate through ERC-1271. It is a fork test; `pnpm test:fork` now runs every `*Fork.t.sol` under `test/`.
 
 ## 2026-10-13
 
