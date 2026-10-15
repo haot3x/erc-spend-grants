@@ -17,7 +17,7 @@ It needs the `arc_testnet` RPC. Without `FORK_TESTS=true` the suite is skipped, 
 
 ## Contracts
 
-Checked on Arc testnet at block 67244286.
+The suite runs at the latest Arc testnet block; it was last run at block 67252949.
 
 | Contract | Address |
 | --- | --- |
@@ -42,6 +42,7 @@ The token is a mock deployed in the fork.
 | Principal revokes after the operation is signed | Validation passes; execution reverts `SpendGrantError(REVOKED)`; nothing moves; the paymaster's deposit is charged |
 | Principal cuts a cap below the amount after the operation is signed | Validation passes; execution reverts `SpendGrantError(OVER_TX_CAP)`; nothing moves; the paymaster's deposit is charged |
 | Grant names the owner's key as delegate; the account sends the operation | Validation passes; execution reverts `SpendGrantError(UNAUTHORIZED_DELEGATE)`; nothing moves; the paymaster's deposit is charged |
+| One bundle of four sponsored operations from the account under a grant capped at 10e6 per window, each spending 3e6, each passing `check` beforehand | The first three spend; the fourth reverts `SpendGrantError(OVER_WINDOW_CAP)` in `UserOperationRevertReason`; the vendor receives 9e6; the paymaster's deposit drops by the four operations' `actualGasCost` |
 | `check` before each of the three failing operations, and before and after a revoke | Reports the reason the execution reverts with; `OK` before the revoke |
 | SimpleAccount and ERC-1271 | `isValidSignature` reverts with no data; `supportsInterface(0x1626ba7e)` is false |
 | Owner signs the executor's authorization digest, raw or with the Ethereum signed-message prefix; a relayer submits | `BadAuthorization` |
@@ -49,7 +50,9 @@ The token is a mock deployed in the fork.
 ## Notes for integrators
 
 - Call the registry's `check(grantId, account, asset, amount, recipient)` before sending the UserOperation. Neither the account's validation nor the bundler's simulation of validation evaluates the grant. A grant revoked or tightened after the operation was signed is discovered only in execution, after the gas is spent.
-- A paymaster that sponsors spends should run the same check, or simulate execution, before it signs for the operation. Otherwise it pays for failures.
-- `check` is a read at one block. The principal can still change the grant before the operation is included.
+- A sponsoring relay runs `check` or an `eth_call` simulation of the operation off chain before it issues its paymaster signature. Reading the registry inside `validatePaymasterUserOp` is restricted for unstaked paymasters under ERC-7562, and in any case it only holds for that block. The sponsor pays for any change to the grant between the check and inclusion.
+- `check` is a read at one block, for one operation. The principal can still change the grant before the operation is included, and operations already queued under the same grant are not counted: four operations that each pass `check` can together exceed the window cap, and the ones that run after the cap is spent fail in execution at the sponsor's cost. A sponsor must account for the operations it has already accepted under the same grant.
+- EntryPoint v0.7 charges a penalty of 10% of the unused execution gas, which is `callGasLimit` plus `paymasterPostOpGasLimit` less the gas used there, on top of the gas used. A failed spend uses little of its `callGasLimit`, so it can cost the sponsor more than the gas it used. A tight `callGasLimit` limits the penalty.
+- The tests set the fee cap to twice Arc's base fee plus the tip, about 20 gwei at the last run, and the bundler's gas price to the base fee plus the tip, so the gas costs are those of an operation a bundler would include.
 - The account is the delegate, not its owner key. A grant to the owner EOA is a different grant; the account's spend under it fails with `UNAUTHORIZED_DELEGATE`.
 - SimpleAccount v0.7 cannot be a relayed delegate, because it has no ERC-1271. Session keys and other account modules are out of scope here.

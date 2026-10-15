@@ -89,19 +89,20 @@ contract SpendGrant4337ForkTest is Test {
     SpendGrantAuthorizationExecutor internal constant EXECUTOR =
         SpendGrantAuthorizationExecutor(0xB99785329AbEc9936b6EF6350015be39D3392646);
 
-    uint256 internal constant OWNER_PK = 0xB0B;
-    uint256 internal constant ACCOUNT_SALT = 1;
-    uint256 internal constant NEW_ACCOUNT_SALT = 2;
+    uint256 internal constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
     uint128 internal constant VERIFICATION_GAS = 500_000;
     uint128 internal constant DEPLOY_VERIFICATION_GAS = 1_000_000;
     uint128 internal constant CALL_GAS = 500_000;
     uint256 internal constant PRE_VERIFICATION_GAS = 100_000;
     uint128 internal constant MAX_PRIORITY_FEE = 1 gwei;
-    uint128 internal constant MAX_FEE = 10 gwei;
     uint128 internal constant PAYMASTER_VERIFICATION_GAS = 100_000;
     uint128 internal constant PAYMASTER_POST_OP_GAS = 50_000;
     uint256 internal constant AMOUNT = 3e6;
 
+    /// The owner key and both account salts are drawn per run, so no one can touch the counterfactual addresses first.
+    uint256 internal ownerPk;
+    uint256 internal accountSalt;
+    uint256 internal newAccountSalt;
     MockERC20 internal usdc;
     TestPaymaster internal paymaster;
     ISimpleAccount internal account;
@@ -126,7 +127,10 @@ contract SpendGrant4337ForkTest is Test {
         );
         assertEq(REGISTRY.executor(), address(EXECUTOR), "registry and executor do not match");
 
-        owner = vm.addr(OWNER_PK);
+        ownerPk = vm.randomUint(1, SECP256K1_N - 1);
+        accountSalt = vm.randomUint();
+        newAccountSalt = vm.randomUint();
+        owner = vm.addr(ownerPk);
         principal = makeAddr("principal");
         vendor = makeAddr("vendor");
         bundler = makeAddr("bundler");
@@ -140,7 +144,7 @@ contract SpendGrant4337ForkTest is Test {
         vm.deal(address(this), 10 ether);
         ENTRY_POINT.depositTo{value: 1 ether}(address(paymaster));
 
-        account = ISimpleAccount(FACTORY.createAccount(owner, ACCOUNT_SALT));
+        account = ISimpleAccount(FACTORY.createAccount(owner, accountSalt));
         usdc.mint(address(account), 7e6);
     }
 
@@ -170,10 +174,10 @@ contract SpendGrant4337ForkTest is Test {
     /// A paymaster sponsors an account that does not exist yet: the operation deploys it, spends, and the account
     /// holds neither gas, tokens, nor an EntryPoint deposit.
     function test_paymasterSponsorsCounterfactualAccount() public {
-        address sender = FACTORY.getAddress(owner, NEW_ACCOUNT_SALT);
+        address sender = FACTORY.getAddress(owner, newAccountSalt);
         bytes32 id = _register(_grant(sender, 1));
         bytes memory initCode =
-            abi.encodePacked(address(FACTORY), abi.encodeCall(FACTORY.createAccount, (owner, NEW_ACCOUNT_SALT)));
+            abi.encodePacked(address(FACTORY), abi.encodeCall(FACTORY.createAccount, (owner, newAccountSalt)));
 
         assertEq(sender.code.length, 0);
         assertEq(sender.balance, 0);
@@ -247,6 +251,46 @@ contract SpendGrant4337ForkTest is Test {
         assertEq(uint8(reason), uint8(Reason.REVOKED));
     }
 
+    // ---------------------------------------------------------------- a bundle under one grant
+
+    /// `check` covers one operation at one block. Four sponsored operations under one grant each pass `check`, but
+    /// the bundle exhausts the window: the fourth reverts in execution with `OVER_WINDOW_CAP` and the paymaster
+    /// pays for it, while the first three spend.
+    function test_bundleOfFourExhaustsTheWindowAndPaymasterPaysForTheFourth() public {
+        bytes32 id = _register(_grant(address(account), 1));
+        uint256 depositBefore = ENTRY_POINT.balanceOf(address(paymaster));
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](4);
+        for (uint256 i; i < 4; i++) {
+            (bool ok, Reason reason) = REGISTRY.check(id, address(account), address(usdc), AMOUNT, vendor);
+            assertTrue(ok);
+            assertEq(uint8(reason), uint8(Reason.OK));
+            ops[i] = _signedOpWithNonce(address(account), i, "", _spendCall(id), true, VERIFICATION_GAS);
+        }
+
+        Outcome[] memory outs = _handleAll(ops);
+
+        uint256 totalCost;
+        for (uint256 i; i < 4; i++) {
+            assertGt(outs[i].actualGasCost, 0);
+            assertEq(outs[i].paymaster, address(paymaster));
+            totalCost += outs[i].actualGasCost;
+        }
+        assertTrue(outs[0].success);
+        assertTrue(outs[1].success);
+        assertTrue(outs[2].success);
+        assertFalse(outs[3].success);
+        assertEq(outs[3].revertReason, abi.encodeWithSelector(SpendGrantError.selector, Reason.OVER_WINDOW_CAP));
+        assertEq(ENTRY_POINT.getNonce(address(account), 0), 4);
+        assertEq(usdc.balanceOf(vendor), 3 * AMOUNT);
+        assertEq(usdc.balanceOf(principal), 1_000e6 - 3 * AMOUNT);
+        assertEq(usdc.balanceOf(address(account)), 7e6);
+        (uint256 spent, uint256 calls) = REGISTRY.usage(id, address(usdc));
+        assertEq(spent, 3 * AMOUNT);
+        assertEq(calls, 3);
+        assertEq(depositBefore - ENTRY_POINT.balanceOf(address(paymaster)), totalCost);
+    }
+
     // ---------------------------------------------------------------- the account as a relayed delegate
 
     /// SimpleAccount v0.7 does not implement ERC-1271: it has no isValidSignature and no fallback, so the call
@@ -266,7 +310,7 @@ contract SpendGrant4337ForkTest is Test {
         bytes32 id = _register(_grant(address(account), 1));
         uint256 deadline = vm.getBlockTimestamp() + 600;
         bytes32 digest = EXECUTOR.authorizationDigest(id, address(usdc), AMOUNT, vendor, 1, deadline);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(OWNER_PK, digest);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerPk, digest);
 
         vm.prank(makeAddr("relayer"));
         vm.expectRevert(SpendGrantAuthorizationExecutor.BadAuthorization.selector);
@@ -279,7 +323,7 @@ contract SpendGrant4337ForkTest is Test {
         bytes32 id = _register(_grant(address(account), 1));
         uint256 deadline = vm.getBlockTimestamp() + 600;
         bytes32 digest = EXECUTOR.authorizationDigest(id, address(usdc), AMOUNT, vendor, 1, deadline);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(OWNER_PK, _ethSigned(digest));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerPk, _ethSigned(digest));
 
         vm.prank(makeAddr("relayer"));
         vm.expectRevert(SpendGrantAuthorizationExecutor.BadAuthorization.selector);
@@ -331,18 +375,32 @@ contract SpendGrant4337ForkTest is Test {
         bool sponsored,
         uint128 verificationGas
     ) internal view returns (PackedUserOperation memory op) {
+        return
+            _signedOpWithNonce(sender, ENTRY_POINT.getNonce(sender, 0), initCode, callData, sponsored, verificationGas);
+    }
+
+    /// As `_signedOp`, for a given nonce, so several operations of one account can share a bundle. The fee cap is
+    /// twice the current base fee plus the tip, so a bundler could include the operation.
+    function _signedOpWithNonce(
+        address sender,
+        uint256 nonce,
+        bytes memory initCode,
+        bytes memory callData,
+        bool sponsored,
+        uint128 verificationGas
+    ) internal view returns (PackedUserOperation memory op) {
         op.sender = sender;
-        op.nonce = ENTRY_POINT.getNonce(sender, 0);
+        op.nonce = nonce;
         op.initCode = initCode;
         op.callData = callData;
         op.accountGasLimits = bytes32((uint256(verificationGas) << 128) | CALL_GAS);
         op.preVerificationGas = PRE_VERIFICATION_GAS;
-        op.gasFees = bytes32((uint256(MAX_PRIORITY_FEE) << 128) | MAX_FEE);
+        op.gasFees = bytes32((uint256(MAX_PRIORITY_FEE) << 128) | (2 * block.basefee + MAX_PRIORITY_FEE));
         if (sponsored) {
             op.paymasterAndData =
                 abi.encodePacked(address(paymaster), PAYMASTER_VERIFICATION_GAS, PAYMASTER_POST_OP_GAS);
         }
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(OWNER_PK, _ethSigned(ENTRY_POINT.getUserOpHash(op)));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerPk, _ethSigned(ENTRY_POINT.getUserOpHash(op)));
         op.signature = abi.encodePacked(r, s, v);
     }
 
@@ -351,15 +409,29 @@ contract SpendGrant4337ForkTest is Test {
     }
 
     /// Submits `op` as a bundler would and reads the EntryPoint's events for it.
-    function _handle(PackedUserOperation memory op) internal returns (Outcome memory out) {
+    function _handle(PackedUserOperation memory op) internal returns (Outcome memory) {
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
         ops[0] = op;
+        return _handleAll(ops)[0];
+    }
+
+    /// Submits `ops` as one bundle at the gas price a bundler would pay: the base fee plus the tip.
+    function _handleAll(PackedUserOperation[] memory ops) internal returns (Outcome[] memory outs) {
         vm.recordLogs();
+        vm.txGasPrice(block.basefee + MAX_PRIORITY_FEE);
         vm.prank(bundler, bundler);
         ENTRY_POINT.handleOps(ops, payable(bundler));
 
-        bytes32 opHash = ENTRY_POINT.getUserOpHash(op);
         Vm.Log[] memory logs = vm.getRecordedLogs();
+        outs = new Outcome[](ops.length);
+        for (uint256 i; i < ops.length; i++) {
+            outs[i] = _outcome(ops[i], logs);
+        }
+    }
+
+    /// The EntryPoint's events for `op` among `logs`.
+    function _outcome(PackedUserOperation memory op, Vm.Log[] memory logs) internal view returns (Outcome memory out) {
+        bytes32 opHash = ENTRY_POINT.getUserOpHash(op);
         bool found;
         for (uint256 i; i < logs.length; i++) {
             if (logs[i].emitter != address(ENTRY_POINT) || logs[i].topics.length < 3) continue;
