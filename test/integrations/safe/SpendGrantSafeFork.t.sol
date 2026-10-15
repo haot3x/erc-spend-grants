@@ -3,7 +3,14 @@ pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {
-    AssetLimit, GrantState, NotPrincipal, Reason, SpendGrant, SpendGrantError
+    AssetLimit,
+    GrantState,
+    IERC1271,
+    NotPrincipal,
+    Reason,
+    SpendGrant,
+    SpendGrantError,
+    StaleVersion
 } from "../../../src/SpendGrantTypes.sol";
 import {SpendGrantRegistry} from "../../../src/SpendGrantRegistry.sol";
 import {SpendGrantAuthorizationExecutor} from "../../../src/SpendGrantAuthorizationExecutor.sol";
@@ -61,6 +68,10 @@ interface ICompatibilityFallbackHandler {
     function getMessageHashForSafe(address safe, bytes calldata message) external view returns (bytes32);
 }
 
+interface ISignMessageLib {
+    function signMessage(bytes calldata message) external;
+}
+
 interface IMultiSendCallOnly {
     function multiSend(bytes calldata transactions) external payable;
 }
@@ -77,6 +88,7 @@ contract SpendGrantSafeForkTest is Test {
     ISafeProxyFactory internal constant SAFE_FACTORY = ISafeProxyFactory(0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67);
     ICompatibilityFallbackHandler internal constant FALLBACK_HANDLER =
         ICompatibilityFallbackHandler(0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99);
+    ISignMessageLib internal constant SIGN_MESSAGE_LIB = ISignMessageLib(0xd53cd0aB83D845Ac265BE939c57F53AD838012c9);
     IMultiSendCallOnly internal constant MULTI_SEND = IMultiSendCallOnly(0x9641d764fc13c8B624c04430C7356C1C7C8102e2);
     SpendGrantRegistry internal constant REGISTRY = SpendGrantRegistry(0xe8987A22a1e3fd4a63cB517A9476B9d214388287);
     SpendGrantAuthorizationExecutor internal constant EXECUTOR =
@@ -106,8 +118,9 @@ contract SpendGrantSafeForkTest is Test {
 
         treasuryKeys = [uint256(0x7E1), 0x7E2, 0x7E3];
         agentSafeKeys = [uint256(0xA51), 0xA52];
-        treasury = _deploySafe(treasuryKeys, 2, 1);
-        agentSafe = _deploySafe(agentSafeKeys, 2, 2);
+        // Per-run salts give each run fresh Safe addresses that nobody can pre-deploy on Arc.
+        treasury = _deploySafe(treasuryKeys, 2, vm.randomUint(), address(FALLBACK_HANDLER));
+        agentSafe = _deploySafe(agentSafeKeys, 2, vm.randomUint(), address(FALLBACK_HANDLER));
         agent = vm.addr(AGENT_PK);
         vendor = makeAddr("vendor");
 
@@ -127,6 +140,7 @@ contract SpendGrantSafeForkTest is Test {
         assertEq(principal, address(treasury));
         assertEq(delegate, agent);
         (bytes32[] memory ids, uint256 total) = REGISTRY.grantsOf(address(treasury), 0, 10);
+        // The treasury address is fresh per run, so it has no other grants.
         assertEq(total, 1);
         assertEq(ids[0], id);
 
@@ -186,7 +200,8 @@ contract SpendGrantSafeForkTest is Test {
         EXECUTOR.spend(id, address(usdc), 3e6, vendor);
     }
 
-    /// A Safe transaction built from an older version cannot undo a newer update; Safe reports the failed call.
+    /// A Safe transaction built from an older version cannot undo a newer update. Safe hides the reason as GS013;
+    /// simulating the inner call shows it is StaleVersion, and the same terms succeed at the current version.
     function test_staleSafeUpdateFails() public {
         SpendGrant memory terms = _grant(agent, 1);
         bytes32 id = _approveAndRegister(terms);
@@ -197,11 +212,19 @@ contract SpendGrantSafeForkTest is Test {
 
         SpendGrant memory older = _grant(agent, 1);
         bytes memory data = abi.encodeCall(REGISTRY.update, (id, version, older));
+
+        vm.prank(address(treasury));
+        vm.expectRevert(abi.encodeWithSelector(StaleVersion.selector, version + 1));
+        REGISTRY.update(id, version, older);
+
         bytes memory sigs = _signSafeTx(treasury, address(REGISTRY), data, CALL, treasuryKeys);
         vm.expectRevert(bytes("GS013"));
         treasury.execTransaction(address(REGISTRY), 0, data, CALL, 0, 0, 0, address(0), payable(0), sigs);
 
         assertEq(REGISTRY.grantState(id, address(usdc)).maxTotal, 6e6);
+
+        _exec(treasury, treasuryKeys, address(REGISTRY), abi.encodeCall(REGISTRY.update, (id, version + 1, older)));
+        assertEq(REGISTRY.grantState(id, address(usdc)).maxTotal, MAX_TOTAL);
     }
 
     function test_safeRevokes() public {
@@ -235,8 +258,48 @@ contract SpendGrantSafeForkTest is Test {
         uint256 deadline = vm.getBlockTimestamp() + 600;
         bytes32 digest = EXECUTOR.authorizationDigest(id, address(usdc), 3e6, vendor, 1, deadline);
 
+        bytes memory sigs = _sign(digest, agentSafeKeys);
+
+        // The Safe's own ERC-1271 names the failure: the recovered signers are not owners.
+        vm.expectRevert(bytes("GS026"));
+        IERC1271(address(agentSafe)).isValidSignature(digest, sigs);
+
         vm.expectRevert(SpendGrantAuthorizationExecutor.BadAuthorization.selector);
-        EXECUTOR.spendWithAuthorization(id, address(usdc), 3e6, vendor, 1, deadline, _sign(digest, agentSafeKeys));
+        EXECUTOR.spendWithAuthorization(id, address(usdc), 3e6, vendor, 1, deadline, sigs);
+    }
+
+    /// An agent Safe with no fallback handler has no `isValidSignature`, so even correctly wrapped owner
+    /// signatures are refused.
+    function test_agentSafeWithoutFallbackHandlerIsRefused() public {
+        ISafe bare = _deploySafe(agentSafeKeys, 2, vm.randomUint(), address(0));
+        bytes32 id = _approveAndRegister(_grant(address(bare), 1));
+        uint256 deadline = vm.getBlockTimestamp() + 600;
+        bytes32 digest = EXECUTOR.authorizationDigest(id, address(usdc), 3e6, vendor, 1, deadline);
+        bytes32 safeMessage = FALLBACK_HANDLER.getMessageHashForSafe(address(bare), abi.encode(digest));
+
+        vm.expectRevert(SpendGrantAuthorizationExecutor.BadAuthorization.selector);
+        EXECUTOR.spendWithAuthorization(id, address(usdc), 3e6, vendor, 1, deadline, _sign(safeMessage, agentSafeKeys));
+        assertEq(usdc.balanceOf(vendor), 0);
+    }
+
+    /// The agent Safe can approve a digest on chain: a threshold transaction delegatecalls SignMessageLib, and a
+    /// relayer then submits the spend with an empty signature.
+    function test_agentSafeApprovesDigestOnChain() public {
+        bytes32 id = _approveAndRegister(_grant(address(agentSafe), 1));
+        uint256 deadline = vm.getBlockTimestamp() + 600;
+        bytes32 digest = EXECUTOR.authorizationDigest(id, address(usdc), 3e6, vendor, 1, deadline);
+
+        _execDelegate(
+            agentSafe,
+            agentSafeKeys,
+            address(SIGN_MESSAGE_LIB),
+            abi.encodeCall(ISignMessageLib.signMessage, (abi.encode(digest)))
+        );
+
+        vm.prank(makeAddr("relayer"));
+        EXECUTOR.spendWithAuthorization(id, address(usdc), 3e6, vendor, 1, deadline, "");
+        assertEq(usdc.balanceOf(vendor), 3e6);
+        assertTrue(EXECUTOR.nonceUsed(address(agentSafe), 1));
     }
 
     /// The agent Safe's threshold applies to its authorizations: one of its two owners is not enough.
@@ -248,11 +311,19 @@ contract SpendGrantSafeForkTest is Test {
         uint256[] memory one = new uint256[](1);
         one[0] = agentSafeKeys[0];
 
+        bytes memory sigs = _sign(safeMessage, one);
+
+        // Safe's ERC-1271 reports the short signature as GS020.
+        vm.expectRevert(bytes("GS020"));
+        IERC1271(address(agentSafe)).isValidSignature(digest, sigs);
+
         vm.expectRevert(SpendGrantAuthorizationExecutor.BadAuthorization.selector);
-        EXECUTOR.spendWithAuthorization(id, address(usdc), 3e6, vendor, 1, deadline, _sign(safeMessage, one));
+        EXECUTOR.spendWithAuthorization(id, address(usdc), 3e6, vendor, 1, deadline, sigs);
     }
 
     // ---------------------------------------------------------------- helpers
+
+    uint256 internal constant MAX_TOTAL = 100e6;
 
     function _grant(address delegate, uint256 salt) internal view returns (SpendGrant memory m) {
         uint64 now_ = uint64(vm.getBlockTimestamp());
@@ -266,11 +337,12 @@ contract SpendGrantSafeForkTest is Test {
         m.validUntil = now_ + 30 days;
         m.salt = salt;
         m.assets = new AssetLimit[](1);
-        m.assets[0] = AssetLimit(address(usdc), 5e6, 10e6, 100e6);
+        m.assets[0] = AssetLimit(address(usdc), 5e6, 10e6, MAX_TOTAL);
     }
 
     function _approveAndRegister(SpendGrant memory terms) internal returns (bytes32 id) {
-        bytes memory approve = abi.encodeCall(MockERC20.approve, (address(EXECUTOR), type(uint256).max));
+        // Approve exactly the grant's lifetime cap: the allowance, not the grant, bounds a misused Safe.
+        bytes memory approve = abi.encodeCall(MockERC20.approve, (address(EXECUTOR), terms.assets[0].maxTotal));
         bytes memory register = abi.encodeCall(REGISTRY.register, (terms));
         bytes memory batch = abi.encodePacked(
             abi.encodePacked(CALL, address(usdc), uint256(0), approve.length, approve),
@@ -287,6 +359,11 @@ contract SpendGrantSafeForkTest is Test {
     function _exec(ISafe safe, uint256[] memory keys, address to, bytes memory data) internal {
         bytes memory sigs = _signSafeTx(safe, to, data, CALL, keys);
         assertTrue(safe.execTransaction(to, 0, data, CALL, 0, 0, 0, address(0), payable(0), sigs));
+    }
+
+    function _execDelegate(ISafe safe, uint256[] memory keys, address to, bytes memory data) internal {
+        bytes memory sigs = _signSafeTx(safe, to, data, DELEGATECALL, keys);
+        assertTrue(safe.execTransaction(to, 0, data, DELEGATECALL, 0, 0, 0, address(0), payable(0), sigs));
     }
 
     function _signSafeTx(ISafe safe, address to, bytes memory data, uint8 operation, uint256[] memory keys)
@@ -307,15 +384,17 @@ contract SpendGrantSafeForkTest is Test {
         }
     }
 
-    function _deploySafe(uint256[] memory keys, uint256 threshold, uint256 saltNonce) internal returns (ISafe) {
+    function _deploySafe(uint256[] memory keys, uint256 threshold, uint256 saltNonce, address handler)
+        internal
+        returns (ISafe)
+    {
         uint256[] memory sorted = _sortByAddress(keys);
         address[] memory owners = new address[](sorted.length);
         for (uint256 i; i < sorted.length; i++) {
             owners[i] = vm.addr(sorted[i]);
         }
-        bytes memory init = abi.encodeCall(
-            ISafe.setup, (owners, threshold, address(0), "", address(FALLBACK_HANDLER), address(0), 0, payable(0))
-        );
+        bytes memory init =
+            abi.encodeCall(ISafe.setup, (owners, threshold, address(0), "", handler, address(0), 0, payable(0)));
         return ISafe(SAFE_FACTORY.createProxyWithNonce(SAFE_SINGLETON, init, saltNonce));
     }
 

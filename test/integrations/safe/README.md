@@ -5,7 +5,7 @@
 The two sides use different mechanisms:
 
 - **Principal.** A registered grant carries no principal signature. `register`, `update`, and `revoke` require `msg.sender == principal`, so the Safe calls them through `execTransaction` at its threshold. An owner's own key is not the principal. This is the spec's "the account's call policy is its grant policy": whatever can make the Safe call the registry controls its grants, and ERC-1271 plays no part.
-- **Delegate.** An agent that is a Safe authorizes a spend through the executor's signed path, which validates the delegate's signature with ERC-1271. Safe's `isValidSignature` checks owner signatures over the digest wrapped as a SafeMessage, `getMessageHashForSafe(safe, abi.encode(digest))`, not over the digest itself.
+- **Delegate.** An agent that is a Safe authorizes a spend through the executor's signed path, which validates the delegate's signature with ERC-1271. Safe v1.4.1's singleton has no `isValidSignature`. The CompatibilityFallbackHandler supplies `isValidSignature(bytes32,bytes)` through the Safe's fallback, wraps the digest as `getMessageHashForSafe(safe, abi.encode(digest))`, and calls `checkSignatures` on that, so owners sign the wrapped hash, not the digest itself. An agent Safe must have that handler set as its fallback handler.
 
 ## Run
 
@@ -25,10 +25,11 @@ Checked on Arc testnet at block 67212822.
 | SafeProxyFactory v1.4.1 | `0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67` |
 | CompatibilityFallbackHandler v1.4.1 | `0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99` |
 | MultiSendCallOnly v1.4.1 | `0x9641d764fc13c8B624c04430C7356C1C7C8102e2` |
+| SignMessageLib v1.4.1 | `0xd53cd0aB83D845Ac265BE939c57F53AD838012c9` |
 | ERC-8427 registry | `0xe8987A22a1e3fd4a63cB517A9476B9d214388287` |
 | ERC-8427 executor | `0xB99785329AbEc9936b6EF6350015be39D3392646` |
 
-The token is a mock deployed in the fork.
+The token is a mock deployed in the fork. Each run deploys its Safes with random salts, so their addresses cannot be pre-deployed on Arc.
 
 ## What the tests show
 
@@ -39,15 +40,19 @@ The token is a mock deployed in the fork.
 | An owner calls `register` from its own key | `NotPrincipal` |
 | One owner signs a 2-of-3 Safe transaction to register | Safe reverts `GS020`; nothing registered |
 | Safe transaction lowers the caps | Usage kept; `spendableNow` drops; the next spend over the new window cap fails `OVER_WINDOW_CAP` |
-| Safe transaction built from the older version, executed after an update | `StaleVersion` inside the call, which Safe reports as `GS013`; the newer caps stay |
+| Safe transaction built from the older version, executed after an update | Safe hides the reason as `GS013`; simulating the inner call confirms it is `StaleVersion`; the newer caps stay, and the same terms succeed proposed at the current version |
 | Safe transaction revokes | The next spend fails `REVOKED` |
 | Agent Safe owners sign the SafeMessage-wrapped authorization; a relayer submits | Paid; the nonce is recorded under the agent Safe |
-| Agent Safe owners sign the raw authorization digest | `BadAuthorization` |
-| One of the agent Safe's two owners signs | `BadAuthorization` |
+| Agent Safe owners sign the raw authorization digest | `BadAuthorization`; the Safe's own `isValidSignature` reverts `GS026` |
+| One of the agent Safe's two owners signs | `BadAuthorization`; the Safe's own `isValidSignature` reverts `GS020` |
+| Agent Safe with no fallback handler, owners sign the wrapped digest correctly | `BadAuthorization` |
+| Agent Safe approves the digest on chain by a threshold delegatecall to SignMessageLib `signMessage`; a relayer submits with an empty signature | Paid; the nonce is recorded under the agent Safe |
 
 ## Notes for integrators
 
 - Batch the approval with the registration, as here, or approve first. A grant registered before the approval shows `spendableNow` of zero until the approval lands.
 - Safe reports any failed inner call as `GS013` when `safeTxGas` and `gasPrice` are zero, so a wallet that wants the registry's error, such as `StaleVersion`, should simulate the inner call before proposing the Safe transaction.
+- The approval to the executor is exactly the grant's `maxTotal` here. The allowance to the executor, not the grant caps, bounds what a misused module, guard, or signer that can make the Safe call the registry can spend (spec `ERCS/erc-8427.md`, "call policy is its grant policy" in Security Considerations).
+- An on-chain approval through SignMessageLib stays valid until the deadline unless the agent Safe calls `executor.cancelNonce(nonce)`.
 - An agent Safe's signers sign a SafeMessage. Tooling that signs the executor's digest directly, as it would for an EOA delegate, produces signatures the Safe rejects.
 - A module or guard that lets something other than the owners make the Safe call the registry can register and change grants. The treasury's module set is part of its grant policy.
