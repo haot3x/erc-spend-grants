@@ -39,7 +39,7 @@ The reference ships three executors. Each takes a `grantId` and reads the grant'
 | Solidity reference                    | [`src/`](src/), tests in [`test/`](test/)                                                                         |
 | TypeScript hashing / rendering / JSON | [`packages/grants/`](packages/grants/)                                                                           |
 | ERC-7730 display descriptor           | [`descriptors/spend-grant.erc7730.json`](descriptors/spend-grant.erc7730.json)                                   |
-| Integration tests                     | [`test/integrations/`](test/integrations/): [x402](test/integrations/x402/) payments settled under a grant; [Safe](test/integrations/safe/) as principal and delegate on Arc (fork); [ERC-8004](test/integrations/erc8004/) agent wallet as delegate on Arc (fork) |
+| Integration tests                     | [`test/integrations/`](test/integrations/): [x402](test/integrations/x402/) payments settled under a grant; [Safe](test/integrations/safe/) as principal and delegate on Arc (fork); [ERC-8004](test/integrations/erc8004/) agent wallet as delegate on Arc (fork); [ERC-4337](test/integrations/erc4337/) SimpleAccount as delegate through the EntryPoint on Arc (fork) |
 | Deployments                           | [`deployments/`](deployments/) (Arc testnet: registry `0xe8987A22a1e3fd4a63cB517A9476B9d214388287`, executor `0xB99785329AbEc9936b6EF6350015be39D3392646`) |
 
 Neighboring standards (ERC-7710, 7715, 8226, and the bounded-agent-actions draft) are cited in the Rationale.
@@ -70,7 +70,7 @@ pnpm test      # forge tests (256 fuzz runs, set in foundry.toml), then TypeScri
 
 `pnpm check` runs formatting, lint, both test suites, the typecheck, and `erc:check`. There is no hosted CI; run it before pushing.
 
-`pnpm test:symbolic` runs the [Halmos](https://github.com/a16z/halmos) properties in `test/symbolic/` (`pip install halmos`). `pnpm analyze` runs [Aderyn](https://github.com/Cyfrin/aderyn) over `src/`. `pnpm test:fork` runs every `*Fork.t.sol` under `test/` over the `arc_testnet` RPC: `test/fork/` drives the redemption enforcer and executor through MetaMask's DelegationManager v1.3.0 as deployed on Arc testnet, and `test/integrations/safe/` drives Safe v1.4.1 and `test/integrations/erc8004/` the ERC-8004 Identity Registry against the deployed registry and executor; without `FORK_TESTS=true` those tests are skipped, so `pnpm check` stays offline. None of the three is part of the ERC bundle.
+`pnpm test:symbolic` runs the [Halmos](https://github.com/a16z/halmos) properties in `test/symbolic/` (`pip install halmos`). `pnpm analyze` runs [Aderyn](https://github.com/Cyfrin/aderyn) over `src/`. `pnpm test:fork` runs every `*Fork.t.sol` under `test/` over the `arc_testnet` RPC: `test/fork/` drives the redemption enforcer and executor through MetaMask's DelegationManager v1.3.0 as deployed on Arc testnet, and `test/integrations/` drives Safe v1.4.1, the ERC-8004 Identity Registry, and an ERC-4337 SimpleAccount v0.7 through EntryPoint v0.7 against the deployed registry and executor; without `FORK_TESTS=true` those tests are skipped, so `pnpm check` stays offline. None of the three is part of the ERC bundle.
 
 Solidity and TypeScript must reproduce the same domain separator, struct hash, and `grantId`. TypeScript also checks the canonical rendering bytes.
 
