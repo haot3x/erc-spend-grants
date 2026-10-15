@@ -67,7 +67,7 @@ export const spendGrantExecutorAbi = [
   spendGrantErrorFragment,
 ] as const;
 
-/** SpendGrantRegistry: `parties` and the errors its calls can raise. */
+/** SpendGrantRegistry: `parties`, `grantState` and the errors its calls can raise. */
 export const spendGrantRegistryAbi = [
   {
     type: "function",
@@ -76,6 +76,37 @@ export const spendGrantRegistryAbi = [
     outputs: [
       { name: "principal", type: "address", internalType: "address" },
       { name: "delegate", type: "address", internalType: "address" },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "grantState",
+    inputs: [
+      { name: "grantId", type: "bytes32", internalType: "bytes32" },
+      { name: "asset", type: "address", internalType: "address" },
+    ],
+    outputs: [
+      {
+        name: "",
+        type: "tuple",
+        internalType: "struct GrantState",
+        components: [
+          { name: "status", type: "uint8", internalType: "enum Reason" },
+          { name: "maxPerCall", type: "uint256", internalType: "uint256" },
+          { name: "maxPerWindow", type: "uint256", internalType: "uint256" },
+          { name: "maxTotal", type: "uint256", internalType: "uint256" },
+          { name: "spent", type: "uint256", internalType: "uint256" },
+          { name: "windowSpent", type: "uint256", internalType: "uint256" },
+          { name: "liveDebits", type: "uint256", internalType: "uint256" },
+          { name: "nextExpiry", type: "uint256", internalType: "uint256" },
+          { name: "balance", type: "uint256", internalType: "uint256" },
+          { name: "allowance", type: "uint256", internalType: "uint256" },
+          { name: "balanceKnown", type: "bool", internalType: "bool" },
+          { name: "allowanceKnown", type: "bool", internalType: "bool" },
+          { name: "spendableNow", type: "uint256", internalType: "uint256" },
+        ],
+      },
     ],
     stateMutability: "view",
   },

@@ -23,7 +23,12 @@ const REASON_NAMES = [
   "nonexistent",
 ] as const;
 
-function codeFor(errorName: string, args: readonly unknown[] | undefined): string | undefined {
+interface Decoded {
+  errorName: string;
+  args: readonly unknown[] | undefined;
+}
+
+function codeFor({ errorName, args }: Decoded): string | undefined {
   switch (errorName) {
     case "SpendGrantError": {
       const reason = args?.[0];
@@ -36,28 +41,36 @@ function codeFor(errorName: string, args: readonly unknown[] | undefined): strin
       return "invalid_spend_grant_authorization_expired";
     case "BadAuthorization":
       return "invalid_spend_grant_signature";
-    case "TransferFailed":
-      return "insufficient_funds";
     case "NativeRequiresAccountAdapter":
-      return "invalid_payload";
+      // The facilitator refuses the native asset before it simulates, so this is only a fallback.
+      return "invalid_payment_requirements";
     default:
+      // TransferFailed has no code of its own: the facilitator reads the grant's balance and allowance to tell a
+      // shortfall (`insufficient_funds`) from any other token failure.
       return undefined;
   }
 }
 
 /** Revert to the x402 errorCode in the mapping's table; undefined when the error is not a known revert. */
 export function errorCodeFromRevert(error: unknown): string | undefined {
+  const decoded = decodeRevert(error);
+  return decoded === undefined ? undefined : codeFor(decoded);
+}
+
+/** Whether the error is the executor's `TransferFailed()` revert. */
+export function isTransferFailed(error: unknown): boolean {
+  return decodeRevert(error)?.errorName === "TransferFailed";
+}
+
+function decodeRevert(error: unknown): Decoded | undefined {
   if (!(error instanceof BaseError)) return undefined;
 
   const reverted = error.walk((e) => e instanceof ContractFunctionRevertedError);
   if (reverted instanceof ContractFunctionRevertedError) {
-    if (reverted.data !== undefined) {
-      const code = codeFor(reverted.data.errorName, reverted.data.args);
-      if (code !== undefined) return code;
-    }
+    if (reverted.data !== undefined) return reverted.data;
     if (reverted.raw !== undefined) {
-      const code = fromRaw(reverted.raw);
-      if (code !== undefined) return code;
+      const decoded = fromRaw(reverted.raw);
+      if (decoded !== undefined) return decoded;
     }
   }
 
@@ -67,10 +80,10 @@ export function errorCodeFromRevert(error: unknown): string | undefined {
   return isHex(data) ? fromRaw(data) : undefined;
 }
 
-function fromRaw(data: Hex): string | undefined {
+function fromRaw(data: Hex): Decoded | undefined {
   try {
-    const decoded = decodeErrorResult({ abi: revertAbi, data });
-    return codeFor(decoded.errorName, decoded.args);
+    const { errorName, args } = decodeErrorResult({ abi: revertAbi, data });
+    return { errorName, args };
   } catch {
     return undefined;
   }

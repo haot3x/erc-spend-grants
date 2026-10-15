@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { getAddress, hashDomain, hashTypedData, type Address, type Hex } from "viem";
+import { getAddress, hashDomain, hashTypedData, keccak256, zeroAddress, type Address, type Hex } from "viem";
 import {
+  MIN_DEADLINE_SLACK_SECONDS,
   createSpendGrantPayment,
   settle,
   spendAuthorizationDomain,
@@ -15,11 +16,19 @@ import {
 import { account, artifact, clients, deploy, startAnvil, type Deployment } from "./harness.js";
 
 const MAX_TIMEOUT = 60;
-const CHAIN_ID = 31337;
+let CHAIN_ID: number;
 
 const registryArt = artifact("SpendGrantRegistry.sol", "SpendGrantRegistry");
 const executorArt = artifact("SpendGrantAuthorizationExecutor.sol", "SpendGrantAuthorizationExecutor");
 const tokenArt = artifact("MockERC20.sol", "MockERC20");
+
+const NATIVE: Address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+/**
+ * Runtime code for a token whose balanceOf and allowance read as 2^256-1 and whose transferFrom always reverts: a
+ * failure that is not a balance or allowance shortfall, as a blocklisted payee would cause.
+ * 5f 35 60e0 1c 63 23b872dd 14 6016 57 | 5f 19 5f 52 6020 5f f3 | 5b 5f 5f fd
+ */
+const BLOCKING_TOKEN_CODE: Hex = "0x5f3560e01c6323b872dd146016575f195f5260205ff35b5f5ffd";
 
 const deployerAcct = account(0);
 const principalAcct = account(1);
@@ -110,7 +119,8 @@ async function pay(req: PaymentRequirements, nonce: bigint): Promise<PaymentPayl
 beforeAll(async () => {
   const anvil = await startAnvil();
   stop = anvil.stop;
-  c = clients(anvil.url);
+  CHAIN_ID = anvil.chainId;
+  c = clients(anvil.url, anvil.chainId);
   const deployer = c.wallet(deployerAcct);
   d = await deploy(c.publicClient, deployer);
 
@@ -328,6 +338,93 @@ describe("a failure after the transaction is broadcast", () => {
     }
   });
 
+  it("a send that fails after the node took the transaction still returns the hash", async () => {
+    const req = requirements(serverA, 500_000n);
+    const p = await pay(req, 1n);
+    const publicClient = new Proxy(c.publicClient, {
+      get(target, prop, receiver) {
+        if (prop !== "sendRawTransaction") return Reflect.get(target, prop, receiver) as unknown;
+        return async (...args: Parameters<typeof target.sendRawTransaction>) => {
+          await target.sendRawTransaction(...args);
+          throw new Error("connection reset");
+        };
+      },
+    });
+    const res = await settle(p, req, { ...ctx, publicClient });
+    expect(res).toMatchObject({
+      success: false,
+      errorReason: "invalid_transaction_state",
+      payer: principalAcct.address,
+    });
+    expect(res.transaction).toMatch(/^0x[0-9a-f]{64}$/);
+    expect((await c.publicClient.getTransactionReceipt({ hash: res.transaction as Hex })).status).toBe("success");
+    expect(await tokenBalance(serverA)).toBe(500_000n);
+  });
+
+  /** A client whose wait for the receipt fails and whose send is handed to `send`, which may not forward it. */
+  function brokenWait(send: (serialized: Hex) => Promise<void>) {
+    return new Proxy(c.publicClient, {
+      get(target, prop, receiver) {
+        if (prop === "waitForTransactionReceipt") {
+          return () => Promise.reject(new Error("rpc unavailable"));
+        }
+        if (prop !== "sendRawTransaction") return Reflect.get(target, prop, receiver) as unknown;
+        return async ({ serializedTransaction }: { serializedTransaction: Hex }) => {
+          await send(serializedTransaction);
+          return keccak256(serializedTransaction);
+        };
+      },
+    });
+  }
+
+  const cancelFacilitatorNonce = async () =>
+    mined(await c.wallet(facilitatorAcct).sendTransaction({ to: facilitatorAcct.address, value: 0n }));
+
+  it("a failed wait for a transaction that was mined reports the mined outcome", async () => {
+    const req = requirements(serverA, 500_000n);
+    const p = await pay(req, 1n);
+    const publicClient = brokenWait(async (serialized) =>
+      mined(await c.publicClient.sendRawTransaction({ serializedTransaction: serialized })),
+    );
+    const res = await settle(p, req, { ...ctx, publicClient });
+    expect(res).toMatchObject({ success: true, payer: principalAcct.address });
+    expect(res.transaction).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(await tokenBalance(serverA)).toBe(500_000n);
+  });
+
+  it("a failed wait after another transaction took the nonce and nothing was paid reports no hash", async () => {
+    const req = requirements(serverA, 500_000n);
+    const p = await pay(req, 1n);
+    const res = await settle(p, req, { ...ctx, publicClient: brokenWait(cancelFacilitatorNonce) });
+    expect(res).toMatchObject({
+      success: false,
+      errorReason: "invalid_transaction_state",
+      transaction: "",
+      payer: principalAcct.address,
+    });
+    expect(await tokenBalance(serverA)).toBe(0n);
+  });
+
+  it("a failed wait after another transaction took the nonce and paid keeps the hash", async () => {
+    const req = requirements(serverA, 500_000n);
+    const p = await pay(req, 1n);
+    const paidByObserver = async () => {
+      await mined(
+        await c.wallet(observerAcct).writeContract({
+          address: d.executor,
+          abi: spendGrantExecutorAbi,
+          functionName: "spendWithAuthorization",
+          args: [p.payload.grantId, d.token, 500_000n, serverA, 1n, BigInt(p.payload.deadline), p.payload.authorization],
+        }),
+      );
+      await cancelFacilitatorNonce();
+    };
+    const res = await settle(p, req, { ...ctx, publicClient: brokenWait(paidByObserver) });
+    expect(res).toMatchObject({ success: false, errorReason: "invalid_transaction_state", payer: principalAcct.address });
+    expect(res.transaction).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(await tokenBalance(serverA)).toBe(500_000n);
+  });
+
   // The reference contracts cannot mine a revert that also re-simulates cleanly, so a test double reports the
   // receipt as reverted, at the block before the transaction was mined, where the nonce was still unused.
   it("a mined revert whose re-simulation passes reports invalid_transaction_state with no hash", async () => {
@@ -474,6 +571,39 @@ describe("the principal acts between verify and settle", () => {
     );
     expect(await verify(p, req, ctx)).toMatchObject({ isValid: false, invalidReason: "insufficient_funds" });
   });
+
+  it("a balance below the amount is insufficient_funds", async () => {
+    const req = requirements(serverA, 500_000n);
+    const p = await pay(req, 1n);
+    await mined(
+      await principal().writeContract({
+        address: d.token,
+        abi: tokenArt.abi,
+        functionName: "transfer",
+        args: [serverB, 1_000_000_000n - 100_000n],
+      }),
+    );
+    expect(await verify(p, req, ctx)).toMatchObject({ isValid: false, invalidReason: "insufficient_funds" });
+    expect(await settle(p, req, ctx)).toMatchObject({
+      success: false,
+      errorReason: "insufficient_funds",
+      transaction: "",
+    });
+  });
+
+  it("a token that fails for another reason is not insufficient_funds", async () => {
+    const req = requirements(serverA, 500_000n);
+    const p = await pay(req, 1n);
+    await c.testClient.setCode({ address: d.token, bytecode: BLOCKING_TOKEN_CODE });
+    const sent = await facilitatorTxCount();
+    expect(await verify(p, req, ctx)).toMatchObject({ isValid: false, invalidReason: "unexpected_verify_error" });
+    expect(await settle(p, req, ctx)).toMatchObject({
+      success: false,
+      errorReason: "unexpected_settle_error",
+      transaction: "",
+    });
+    expect(await facilitatorTxCount()).toBe(sent);
+  });
 });
 
 describe("what the signature binds", () => {
@@ -501,6 +631,42 @@ describe("what the signature binds", () => {
     expect(await tokenBalance(serverA)).toBe(0n);
   });
 
+  it("the facilitator refuses a deadline beyond maxTimeoutSeconds or inside the slack, and sends nothing", async () => {
+    const req = requirements(serverA, 500_000n);
+    const t = await now(); // no block is mined below, so the latest block stays at t
+    const sentAt = (deadline: bigint, nonce: bigint) =>
+      createSpendGrantPayment({
+        requirements: req,
+        grantId,
+        nonce,
+        account: agentAcct,
+        now: deadline - BigInt(MAX_TIMEOUT),
+      });
+    const max = t + BigInt(MAX_TIMEOUT);
+    const slack = t + MIN_DEADLINE_SLACK_SECONDS;
+    const refused = [max + 1n, max + 1_000_000n, slack, slack - 1n, t];
+    const sent = await facilitatorTxCount();
+    let nonce = 1n;
+    for (const deadline of refused) {
+      const p = await sentAt(deadline, nonce++);
+      expect(await verify(p, req, ctx), `deadline ${deadline}`).toMatchObject({
+        isValid: false,
+        invalidReason: "invalid_payload",
+      });
+      expect(await settle(p, req, ctx), `deadline ${deadline}`).toMatchObject({
+        success: false,
+        errorReason: "invalid_payload",
+        transaction: "",
+      });
+    }
+    expect(await facilitatorTxCount()).toBe(sent);
+    expect(await tokenBalance(serverA)).toBe(0n);
+    // Both ends of the accepted range are accepted.
+    for (const deadline of [max, slack + 1n]) {
+      expect((await verify(await sentAt(deadline, nonce++), req, ctx)).isValid, `deadline ${deadline}`).toBe(true);
+    }
+  });
+
   it("an altered amount surfaces as unauthorized_delegate", async () => {
     const req = requirements(serverA, 500_000n);
     const p = await pay(req, 1n);
@@ -517,9 +683,9 @@ describe("what the signature binds", () => {
     expect(await tokenBalance(facilitatorAcct.address)).toBe(0n);
   });
 
-  it("payTo may not be the registry, the executor or the token", async () => {
+  it("payTo may not be the principal, zero, the registry, the executor or the token", async () => {
     let i = 0n;
-    for (const bad of [d.registry, d.executor, d.token]) {
+    for (const bad of [principalAcct.address, zeroAddress, d.registry, d.executor, d.token]) {
       const req = requirements(bad, 500_000n);
       expect(await verify(await pay(req, i++), req, ctx)).toMatchObject({
         isValid: false,
@@ -632,6 +798,24 @@ describe("pre-checks", () => {
     expect(await code(bad({ nonce: 1 as unknown as string }), req)).toBe("invalid_payload");
     expect(await code(bad({ authorization: "0x123" }), req)).toBe("invalid_payload");
   });
+  it("rejects the native asset as invalid_payment_requirements, from verify and settle", async () => {
+    for (const asset of [NATIVE, NATIVE.toLowerCase()]) {
+      const nativeReq = requirements(serverA, 500_000n, asset as Address);
+      const nativePayment = await pay(nativeReq, 1n);
+      expect(await code(nativePayment, nativeReq)).toBe("invalid_payment_requirements");
+      expect(await settle(nativePayment, nativeReq, ctx)).toMatchObject({
+        success: false,
+        errorReason: "invalid_payment_requirements",
+        transaction: "",
+      });
+    }
+  });
+  it("reports a malformed authorization as invalid_spend_grant_signature", async () => {
+    for (const authorization of [`0x${"00".repeat(64)}`, `0x${"00".repeat(65)}`] as Hex[]) {
+      const bad = { ...p, payload: { ...p.payload, authorization } };
+      expect(await code(bad, req)).toBe("invalid_spend_grant_signature");
+    }
+  });
   it("rejects a payTo with a wrong checksum, accepts it in lower case", async () => {
     const checksummed: string = getAddress(serverA);
     const swapped = checksummed.replace(/[a-fA-F]/g, (ch) => (ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase()));
@@ -639,7 +823,8 @@ describe("pre-checks", () => {
     expect(await code(p, { ...req, payTo: swapped })).toBe("invalid_payload");
     expect((await verify(p, { ...req, payTo: checksummed.toLowerCase() }, ctx)).isValid).toBe(true);
   });
-  it("rejects a maxTimeoutSeconds that is not a non-negative integer", async () => {
+  it("rejects a maxTimeoutSeconds that is not a positive integer", async () => {
+    expect(await code(p, { ...req, maxTimeoutSeconds: 0 })).toBe("invalid_payment_requirements");
     expect(await code(p, { ...req, maxTimeoutSeconds: -1 })).toBe("invalid_payment_requirements");
     expect(await code(p, { ...req, maxTimeoutSeconds: 1.5 })).toBe("invalid_payment_requirements");
   });
@@ -679,13 +864,26 @@ describe("createSpendGrantPayment", () => {
     await expect(createSpendGrantPayment({ ...args, requirements: { ...req, extra: {} } })).rejects.toThrow();
   });
 
+  it("draws a random 256-bit nonce when none is given", async () => {
+    const req = requirements(serverA, 1n);
+    const args = { requirements: req, grantId, account: agentAcct, now: await now() };
+    const nonces = new Set<string>();
+    for (let i = 0; i < 4; i++) {
+      const p = await createSpendGrantPayment(args);
+      nonces.add(p.payload.nonce);
+      expect((await verify(p, req, ctx)).isValid).toBe(true);
+    }
+    expect(nonces.size).toBe(4);
+    for (const n of nonces) expect(BigInt(n)).toBeGreaterThan(2n ** 128n);
+  });
+
   it("rejects input the facilitator would refuse", async () => {
     const req = requirements(serverA, 1n);
     const args = { grantId, nonce: 1n, account: agentAcct };
     const rejects = (patch: Partial<PaymentRequirements>, over: Partial<typeof args> = {}) =>
       expect(createSpendGrantPayment({ ...args, ...over, requirements: { ...req, ...patch } })).rejects.toThrow();
     for (const amount of ["", "0x10", " 5 ", "05", "-1", (2n ** 256n).toString()]) await rejects({ amount });
-    for (const maxTimeoutSeconds of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    for (const maxTimeoutSeconds of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
       await rejects({ maxTimeoutSeconds });
     }
     const checksummed: string = getAddress(serverA);

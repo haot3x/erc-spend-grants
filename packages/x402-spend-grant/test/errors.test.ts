@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { BaseError, ContractFunctionRevertedError, encodeErrorResult } from "viem";
-import { errorCodeFromRevert, spendGrantExecutorAbi } from "../src/index.js";
+import { errorCodeFromRevert, isTransferFailed, spendGrantExecutorAbi } from "../src/index.js";
 
 /** The `Reason` enum in src/SpendGrantTypes.sol, as lower snake case names in declaration order. */
 function reasonNames(): string[] {
@@ -49,8 +49,17 @@ describe("errorCodeFromRevert", () => {
     expect(code("NonceAlreadyUsed")).toBe("invalid_spend_grant_nonce_used");
     expect(code("AuthorizationExpired")).toBe("invalid_spend_grant_authorization_expired");
     expect(code("BadAuthorization")).toBe("invalid_spend_grant_signature");
-    expect(code("TransferFailed")).toBe("insufficient_funds");
-    expect(code("NativeRequiresAccountAdapter")).toBe("invalid_payload");
+    expect(code("NativeRequiresAccountAdapter")).toBe("invalid_payment_requirements");
+  });
+
+  it("leaves TransferFailed to the facilitator, which reads the balance and allowance", () => {
+    const transferFailed = rawRevert(encodeErrorResult({ abi: spendGrantExecutorAbi, errorName: "TransferFailed" }));
+    expect(errorCodeFromRevert(transferFailed)).toBeUndefined();
+    expect(isTransferFailed(transferFailed)).toBe(true);
+    expect(isTransferFailed(new Error("boom"))).toBe(false);
+    expect(
+      isTransferFailed(rawRevert(encodeErrorResult({ abi: spendGrantExecutorAbi, errorName: "NonceAlreadyUsed" }))),
+    ).toBe(false);
   });
 
   it("maps a decoded ContractFunctionRevertedError", () => {

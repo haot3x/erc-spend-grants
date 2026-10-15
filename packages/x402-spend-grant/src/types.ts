@@ -1,4 +1,4 @@
-import type { Account, Address, Chain, Hex, PublicClient, Transport, WalletClient } from "viem";
+import type { Address, Chain, Hex, LocalAccount, PublicClient, Transport, WalletClient } from "viem";
 
 export const SPEND_GRANT_SCHEME = "spend-grant";
 
@@ -55,10 +55,13 @@ export interface SupportedResponse {
   signers: Record<string, string[]>;
 }
 
-/** What a facilitator needs: a chain to read and simulate on, an account to submit from, and the contracts. */
+/**
+ * What a facilitator needs: a chain to read and simulate on, a local account to submit from, and the contracts.
+ * The account must sign locally: `settle` signs the transaction itself so it knows the hash before it sends.
+ */
 export interface FacilitatorContext {
   publicClient: PublicClient;
-  walletClient: WalletClient<Transport, Chain | undefined, Account>;
+  walletClient: WalletClient<Transport, Chain | undefined, LocalAccount>;
   executor: Address;
   registry: Address;
   /** How long `settle` waits for the receipt, in milliseconds; viem's default when unset. */

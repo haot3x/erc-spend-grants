@@ -16,10 +16,19 @@ export function isUint256(value: unknown): value is bigint {
   return typeof value === "bigint" && value >= 0n && value <= UINT256_MAX;
 }
 
-/** A non-negative safe integer number of seconds. */
+/** A positive safe integer number of seconds. */
 export function isTimeout(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
+
+/** The native-asset sentinel (`NATIVE` in SpendGrantTypes.sol), which the reference executors do not move. */
+export const NATIVE_ASSET = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+/**
+ * Seconds a deadline must lie beyond the latest block's timestamp for the facilitator to submit it. A payment
+ * closer to expiry than this would be mined after its deadline, so the facilitator would pay gas for a revert.
+ */
+export const MIN_DEADLINE_SLACK_SECONDS = 5n;
 
 /** An address that is all lower case or carries a correct EIP-55 checksum. */
 export function isValidAddress(value: unknown): value is Address {

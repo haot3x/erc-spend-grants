@@ -12,7 +12,7 @@ pnpm --filter @spend-grants/x402 test
 pnpm --filter @spend-grants/x402 build     # dist/ is gitignored; build before importing the package from elsewhere
 ```
 
-The tests need the `anvil` binary from Foundry. The harness uses `ANVIL_BIN` when set, then `~/.foundry/bin/anvil`, then `anvil` on `PATH`. They start a local anvil on a free port, deploy `SpendGrantRegistry`, `SpendGrantAuthorizationExecutor` and `MockERC20` from `out/`, and stop anvil when they finish. They make no calls to a public RPC, so they run offline. `pnpm check` runs them after `forge test`, which builds `out/`.
+The tests need the `anvil` binary from Foundry. The harness uses `ANVIL_BIN` when set, then `~/.foundry/bin/anvil`, then `anvil` on `PATH`. They start a local anvil on a free port with a random chain id, which the harness checks so a different node on that port is refused, deploy `SpendGrantRegistry`, `SpendGrantAuthorizationExecutor` and `MockERC20` from `out/`, and stop anvil when they finish. They make no calls to a public RPC, so they run offline. `pnpm check` runs them after `forge test`, which builds `out/`.
 
 ## Wire format
 
@@ -20,7 +20,7 @@ The package follows the x402 v2 types in [`specs/x402-specification-v2.md`](http
 
 - `extra.executor` holds the executor address. The facilitator refuses a payment whose `extra.executor` differs from its own executor.
 - `nonce` and `deadline` are decimal strings, the same way x402 carries `amount`. This keeps 256-bit values out of JSON numbers.
-- `recipient` in the signed data is `payTo`. `deadline` is the current time plus `maxTimeoutSeconds`.
+- `recipient` in the signed data is `payTo`. The agent signs `deadline` as the current time plus `maxTimeoutSeconds`, and the facilitator refuses any deadline outside the bound described under Facilitator behavior.
 - The signed typed data is `SpendAuthorization(bytes32 grantId,address asset,uint256 amount,address recipient,uint256 nonce,uint256 deadline)`. The domain name is `SpendAuthorization`, the version is `1`, the chain ID comes from `network`, and `verifyingContract` is `extra.executor`.
 
 An accepts entry:
@@ -58,54 +58,48 @@ The `grantId` is the registered grant's id. The principal gives the delegate thi
 
 ```ts
 SPEND_GRANT_SCHEME                            // "spend-grant"
-createSpendGrantPayment({ requirements, grantId, nonce, account, now?, resource? })
+createSpendGrantPayment({ requirements, grantId, account, nonce?, now?, resource? })
 spendAuthorizationDomain(chainId, executor)   // EIP-712 domain
 spendAuthorizationTypes                       // the SpendAuthorization struct
 verify(paymentPayload, requirements, ctx)
 settle(paymentPayload, requirements, ctx)
 supported(ctx)
 errorCodeFromRevert(error)
+isTransferFailed(error)
+MIN_DEADLINE_SLACK_SECONDS                    // 5n
 spendGrantExecutorAbi
 spendGrantRegistryAbi
 ```
 
-`ctx` is `{ publicClient, walletClient, executor, registry, receiptTimeoutMs? }`. `receiptTimeoutMs` bounds how long `settle` waits for the receipt and defaults to viem's. `createSpendGrantPayment` signs with the delegate's `account`. `now` is the signing time in Unix seconds and defaults to the current time. `resource` is the optional x402 resource descriptor. It is not part of the signed data.
+`ctx` is `{ publicClient, walletClient, executor, registry, receiptTimeoutMs? }`. The `walletClient` must hold a local account (a private key or mnemonic account): `settle` signs the transaction itself so it knows the hash before it sends. `receiptTimeoutMs` bounds how long `settle` waits for the receipt and defaults to viem's. `createSpendGrantPayment` signs with the delegate's `account`. `nonce` defaults to a random 256-bit value. `nonceUsed` is keyed by the signer and the nonce across every grant and every server, so the agent must not reuse a nonce or pick a guessable one; pass `nonce` only to retry the same payment. `now` is the signing time in Unix seconds and defaults to the current time. `resource` is the optional x402 resource descriptor. It is not part of the signed data.
 
 Responses:
 
 - `VerifyResponse`: `{ isValid, invalidReason?, payer? }`
-- `SettlementResponse`: `{ success, errorReason?, payer?, transaction, network }`. `transaction` is `""` when settlement fails before a transaction is broadcast or the mined transaction reverted. When a failure comes after broadcast, `transaction` holds the hash. That deviates from x402's empty-string rule so the resource server can reconcile by hash. A settlement replaced or cancelled at the same nonce returns `invalid_transaction_state` with `transaction: ""`. A repriced replacement (same call, higher fee) reports the mined hash.
+- `SettlementResponse`: `{ success, errorReason?, payer?, transaction, network }`. `transaction` is `""` when settlement fails before a transaction is broadcast or the mined transaction reverted. When a failure comes after broadcast, `transaction` holds the hash. That deviates from x402's empty-string rule so the resource server can reconcile by hash. A settlement replaced or cancelled at the same nonce returns `invalid_transaction_state` with `transaction: ""`. When viem reports the replacement as `repriced` (the same target, value and input at a higher fee), the replacement is the settlement and `transaction` is its mined hash.
 - `SupportedResponse`: `{ kinds: [{ x402Version: 2, scheme, network }], extensions: [], signers: { "eip155:*": [facilitator address] } }`
 
 ## Facilitator behavior
 
-Both `verify` and `settle` check the request first and return the x402 section 9 codes: `invalid_x402_version`, `unsupported_scheme`, `invalid_network`, `invalid_payment_requirements` (when `extra.executor` is not the facilitator's executor or `maxTimeoutSeconds` is not a non-negative integer), and `invalid_payload`. Addresses must be lower case or carry a correct EIP-55 checksum, and `amount`, `nonce` and `deadline` must be canonical decimal strings that fit in a uint256. `createSpendGrantPayment` applies the same rules and throws instead of signing input the facilitator would refuse.
+Both `verify` and `settle` check the request first and return the x402 section 9 codes: `invalid_x402_version`, `unsupported_scheme`, `invalid_network`, `invalid_payment_requirements` (when `extra.executor` is not the facilitator's executor, `maxTimeoutSeconds` is not a positive integer, or `asset` is the native sentinel `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`), and `invalid_payload`. Addresses must be lower case or carry a correct EIP-55 checksum, and `amount`, `nonce` and `deadline` must be canonical decimal strings that fit in a uint256. The facilitator also bounds the `deadline` against the latest block's timestamp `t`: it must be no later than `t + maxTimeoutSeconds` and later than `t + 5` (`MIN_DEADLINE_SLACK_SECONDS`), or the code is `invalid_payload` and nothing is submitted. The upper bound stops an agent from signing a far-future deadline, which would make the payload a long-lived bearer authorization. The lower bound stops a deadline that would expire before the transaction is mined, which the facilitator would pay gas to revert. A `maxTimeoutSeconds` of 5 or less therefore never settles. `createSpendGrantPayment` applies the same rules and throws instead of signing input the facilitator would refuse.
 
-`asset`, `amount` and `payTo` come from the `requirements` the resource server passes. `grantId`, `nonce`, `deadline` and `authorization` come from the payload. Requirements whose amount or `payTo` differ from what the agent signed fail the signature check and report `invalid_spend_grant_unauthorized_delegate`. The facilitator cannot redirect or raise a payment.
+`asset`, `amount` and `payTo` come from the `requirements` the resource server passes. `grantId`, `nonce`, `deadline` and `authorization` come from the payload. Requirements whose amount or `payTo` differ from what the agent signed fail the signature check. For an EOA delegate that reports `invalid_spend_grant_unauthorized_delegate`; for a delegate with code (ERC-1271 or EIP-7702) it reports `invalid_spend_grant_signature`. The facilitator cannot redirect or raise a payment.
 
 - `verify` simulates `spendWithAuthorization` with `eth_call`. Nothing is submitted.
-- `settle` simulates, submits, and waits for the receipt. If the receipt reverted, it simulates again at that block to recover the revert reason and map it to a code. If the re-simulation succeeds, the code is `invalid_transaction_state`.
+- `settle` simulates, then signs the transaction, takes its hash, sends it, and waits for the receipt. If the send throws and the error is not a decodable revert, the result is `invalid_transaction_state` with that hash, because the node may have accepted the transaction. If the receipt reverted, it simulates again at that block to recover the revert reason and map it to a code. If the re-simulation succeeds, the code is `invalid_transaction_state`.
 - `payer` is the grant's principal, read from the registry's `parties(grantId)`. It is omitted when the grant is unknown or a pre-check fails.
 
-Error codes:
+Error codes: the table in [`test/integrations/x402/README.md`](../../test/integrations/x402/README.md#error-codes) is normative for the revert-derived codes, the pre-check codes and the fallbacks. `settle` adds outcomes the Solidity model cannot show:
 
-| Revert | `errorCode` |
+| Outcome | `errorReason` |
 | --- | --- |
-| `SpendGrantError(reason)` | `invalid_spend_grant_<reason>`, the reason in lower case, for example `invalid_spend_grant_over_cumulative_cap` |
-| `NonceAlreadyUsed()` | `invalid_spend_grant_nonce_used` |
-| `AuthorizationExpired()` | `invalid_spend_grant_authorization_expired` |
-| `BadAuthorization()` | `invalid_spend_grant_signature` |
-| `TransferFailed()` | `insufficient_funds` |
-| `NativeRequiresAccountAdapter()` | `invalid_payload` |
-| any other revert in `verify` | `unexpected_verify_error` |
-| mined revert whose re-simulation succeeds | `invalid_transaction_state`, with `transaction: ""` |
-| settlement replaced or cancelled by another transaction at the same nonce | `invalid_transaction_state`, with `transaction: ""` because the sent hash was never mined |
-| failure after broadcast (receipt timeout, RPC error while polling) | `invalid_transaction_state`, with the hash in `transaction` |
-| any other revert in `settle` | `unexpected_settle_error` |
+| Mined revert whose re-simulation succeeds | `invalid_transaction_state`, with `transaction: ""` |
+| Settlement replaced or cancelled by another transaction at the same nonce | `invalid_transaction_state`, with `transaction: ""` because the sent hash was never mined |
+| The send throws without a decodable revert, or the wait for the receipt fails and the outcome is still unknown | `invalid_transaction_state`, with the hash in `transaction` |
 
-After a post-broadcast failure the transaction may still be mined. The resource server must reconcile by hash before it retries, or it can pay twice.
+`TransferFailed()` is `insufficient_funds` only when `grantState(grantId, asset)`, read at the same block, shows the principal's balance or allowance below `amount`. Any other token failure, such as a blocklisted payee, is `unexpected_verify_error` or `unexpected_settle_error`.
 
-`TransferFailed()` covers every token failure, including a short balance or allowance. A caller can tell which by reading the token's `balanceOf` and `allowance`.
+When the wait for the receipt fails, `settle` reads the chain before it reports. If the transaction has a receipt, it reports that outcome. If the facilitator account's latest transaction count has passed the transaction's nonce and `nonceUsed(delegate, nonce)` is false, another transaction took the nonce and nothing was paid, so it reports `invalid_transaction_state` with `transaction: ""`. Otherwise the outcome is unknown. `invalid_transaction_state` with a hash then means the transaction may still be pending, or the payment may have been made by a replacement or by another submitter, whose hash `settle` does not know. The resource server must check `nonceUsed(agent, nonce)` and the `payTo` balance before it retries, or it can pay twice.
 
 ## Wiring into an HTTP handler
 

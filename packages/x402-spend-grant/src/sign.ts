@@ -1,4 +1,4 @@
-import { getAddress, type Address, type Hex, type LocalAccount } from "viem";
+import { getAddress, hexToBigInt, toHex, type Address, type Hex, type LocalAccount } from "viem";
 import { SPEND_GRANT_SCHEME, type PaymentPayload, type PaymentRequirements, type ResourceInfo } from "./types.js";
 import { BYTES32, isTimeout, isUint256, isValidAddress, parseUint } from "./validate.js";
 
@@ -34,7 +34,11 @@ export function parseChainId(network: string): number | undefined {
 export interface CreatePaymentParams {
   requirements: PaymentRequirements;
   grantId: Hex;
-  nonce: bigint;
+  /**
+   * `nonceUsed` is keyed by the signer and the nonce across every grant and server, so a nonce one server saw
+   * must never be reused. Defaults to a random 256-bit value; pass one only to retry the same payment.
+   */
+  nonce?: bigint;
   account: LocalAccount;
   /** Unix seconds the deadline counts from; defaults to the local clock. */
   now?: bigint;
@@ -43,7 +47,8 @@ export interface CreatePaymentParams {
 
 /** The agent's answer to an `accepts` entry: a `SpendAuthorization` for exactly those terms. */
 export async function createSpendGrantPayment(params: CreatePaymentParams): Promise<PaymentPayload> {
-  const { requirements, grantId, nonce, account } = params;
+  const { requirements, grantId, account } = params;
+  const nonce = params.nonce ?? hexToBigInt(toHex(crypto.getRandomValues(new Uint8Array(32))));
   if (requirements.scheme !== SPEND_GRANT_SCHEME) {
     throw new Error(`unsupported scheme ${requirements.scheme}`);
   }
@@ -57,7 +62,7 @@ export async function createSpendGrantPayment(params: CreatePaymentParams): Prom
   const amount = parseUint(requirements.amount);
   if (amount === undefined) throw new Error("requirements.amount must be a decimal uint256 string");
   if (!isTimeout(requirements.maxTimeoutSeconds)) {
-    throw new Error("requirements.maxTimeoutSeconds must be a non-negative safe integer");
+    throw new Error("requirements.maxTimeoutSeconds must be a positive safe integer");
   }
   if (!isUint256(nonce)) throw new Error("nonce must be a uint256");
   if (typeof grantId !== "string" || !BYTES32.test(grantId)) {

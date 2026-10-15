@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { randomInt } from "node:crypto";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -43,8 +44,6 @@ function freePort(): Promise<number> {
   });
 }
 
-const ANVIL_CHAIN_ID = 31337;
-
 /** `ANVIL_BIN`, else Foundry's default install, else `anvil` on PATH. */
 function anvilBin(): string {
   const foundry = `${homedir()}/.foundry/bin/anvil`;
@@ -64,11 +63,16 @@ async function chainIdAt(url: string): Promise<string | undefined> {
   }
 }
 
-export async function startAnvil(): Promise<{ url: string; stop: () => void }> {
+/**
+ * Starts an anvil on a free port with a random chain id. The probe checks that id, so a node that answers on the
+ * port but is not the anvil started here (another process that took the port) is refused.
+ */
+export async function startAnvil(): Promise<{ url: string; chainId: number; stop: () => void }> {
   const bin = anvilBin();
   const port = await freePort();
+  const chainId = randomInt(1_000_000, 2_000_000_000);
   const url = `http://127.0.0.1:${port}`;
-  const child: ChildProcess = spawn(bin, ["--port", String(port), "--chain-id", String(ANVIL_CHAIN_ID), "--silent"], {
+  const child: ChildProcess = spawn(bin, ["--port", String(port), "--chain-id", String(chainId), "--silent"], {
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
@@ -80,13 +84,13 @@ export async function startAnvil(): Promise<{ url: string; stop: () => void }> {
   });
   for (let i = 0; i < 200; i++) {
     if (failed !== undefined) throw failed;
-    const chainId = await chainIdAt(url);
-    if (chainId !== undefined) {
+    const reported = await chainIdAt(url);
+    if (reported !== undefined) {
       // Something answers; it is ours only if our child is still alive and reports the chain id it was given.
       if (failed !== undefined) throw failed;
-      if (chainId === `0x${ANVIL_CHAIN_ID.toString(16)}`) return { url, stop: () => void child.kill() };
+      if (reported === `0x${chainId.toString(16)}`) return { url, chainId, stop: () => void child.kill() };
       child.kill();
-      throw new Error(`the node at ${url} reports chain id ${chainId}, not the anvil this harness started`);
+      throw new Error(`the node at ${url} reports chain id ${reported}, not the anvil this harness started`);
     }
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -94,19 +98,17 @@ export async function startAnvil(): Promise<{ url: string; stop: () => void }> {
   throw new Error(`anvil did not start at ${bin}: ${stderr.trim()}`);
 }
 
-export const anvilChain = defineChain({
-  id: ANVIL_CHAIN_ID,
-  name: "Anvil",
-  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-  rpcUrls: { default: { http: ["http://127.0.0.1:8545"] } },
-});
-
 export function account(index: number): LocalAccount {
   return mnemonicToAccount(MNEMONIC, { addressIndex: index });
 }
 
-export function clients(url: string) {
-  const chain = { ...anvilChain, rpcUrls: { default: { http: [url] } } };
+export function clients(url: string, chainId: number) {
+  const chain = defineChain({
+    id: chainId,
+    name: "Anvil",
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    rpcUrls: { default: { http: [url] } },
+  });
   const publicClient = createPublicClient({ chain, transport: http(url), pollingInterval: 100 });
   const testClient = createTestClient({ chain, mode: "anvil", transport: http(url) });
   const wallet = (acct: LocalAccount) => createWalletClient({ account: acct, chain, transport: http(url) });

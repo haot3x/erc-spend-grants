@@ -16,5 +16,6 @@ export {
   spendAuthorizationTypes,
   type CreatePaymentParams,
 } from "./sign.js";
-export { errorCodeFromRevert } from "./errors.js";
+export { errorCodeFromRevert, isTransferFailed } from "./errors.js";
+export { MIN_DEADLINE_SLACK_SECONDS } from "./validate.js";
 export { settle, supported, verify } from "./facilitator.js";
