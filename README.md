@@ -38,6 +38,7 @@ The reference ships three executors. Each takes a `grantId` and reads the grant'
 | Golden vectors                        | [`vectors/v1.json`](vectors/v1.json)                                                                             |
 | Solidity reference                    | [`src/`](src/), tests in [`test/`](test/)                                                                         |
 | TypeScript hashing / rendering / JSON | [`packages/grants/`](packages/grants/)                                                                           |
+| TypeScript x402 facilitator           | [`packages/x402-spend-grant/`](packages/x402-spend-grant/): client signer and `verify` / `settle` / `supported` for the proposed `spend-grant` scheme, tested against a local anvil |
 | ERC-7730 display descriptor           | [`descriptors/spend-grant.erc7730.json`](descriptors/spend-grant.erc7730.json)                                   |
 | Integration tests                     | [`test/integrations/`](test/integrations/): [x402](test/integrations/x402/) payments settled under a grant; [Safe](test/integrations/safe/) as principal and delegate on Arc (fork); [ERC-8004](test/integrations/erc8004/) agent wallet as delegate on Arc (fork); [ERC-4337](test/integrations/erc4337/) SimpleAccount as delegate through the EntryPoint on Arc (fork) |
 | Deployments                           | [`deployments/`](deployments/) (Arc testnet: registry `0xe8987A22a1e3fd4a63cB517A9476B9d214388287`, executor `0xB99785329AbEc9936b6EF6350015be39D3392646`) |

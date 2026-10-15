@@ -22,8 +22,8 @@ It runs with the rest of the suite in `pnpm test`. It sits under `test/integrati
 | `accepts[i].amount` | `amount` |
 | `accepts[i].payTo` | `recipient` |
 | `accepts[i].maxTimeoutSeconds` | `deadline = now + maxTimeoutSeconds` |
-| `accepts[i].extra` | the executor address, so the agent can compute the authorization digest |
-| PAYMENT-SIGNATURE `payload` | `{ grantId, nonce, deadline, authorization }` |
+| `accepts[i].extra` | `{ executor }`, the executor address, so the agent can compute the authorization digest |
+| PAYMENT-SIGNATURE `payload` | `{ grantId, nonce, deadline, authorization }`: `grantId` and `authorization` as hex, `nonce` and `deadline` as decimal strings, as x402 carries `amount` |
 | facilitator `/verify` | `spendWithAuthorization` simulated with `eth_call` |
 | facilitator `/settle` | `spendWithAuthorization` submitted |
 | `SettlementResponse.payer` | the grant's principal, from `parties(grantId)` |
@@ -41,6 +41,7 @@ x402's `exact` error codes are scoped to that scheme, so this mapping derives it
 | `AuthorizationExpired()` | `invalid_spend_grant_authorization_expired` |
 | `BadAuthorization()` | `invalid_spend_grant_signature` |
 | `TransferFailed()` | `insufficient_funds` |
+| `NativeRequiresAccountAdapter()` | `invalid_payload` |
 
 An EOA agent's signature over different terms recovers some other address, which the executor passes on and the registry rejects, so a tampered payload reports `invalid_spend_grant_unauthorized_delegate`, not `invalid_spend_grant_signature`. `TransferFailed()` covers every token failure, a short balance or allowance included; the facilitator can tell which from `grantState`.
 
@@ -68,4 +69,4 @@ An EOA agent's signature over different terms recovers some other address, which
 - The payload is a bearer authorization until it settles or its deadline passes. Anyone who sees it can submit it, though only to the `payTo` and for the `amount` it names. A short `maxTimeoutSeconds` bounds that; `cancelNonce` ends it early.
 - ERC-20 only. The reference executors do not move native currency.
 - Only EOA agents are exercised. ERC-1271 and EIP-7702 delegates are covered by the core suite in [`test/SpendGrantAuthorization.t.sol`](../../SpendGrantAuthorization.t.sol).
-- The facilitator here is modeled in Solidity. An off-chain facilitator speaking x402's HTTP transport is not part of this test.
+- The facilitator here is modeled in Solidity. [`packages/x402-spend-grant/`](../../../packages/x402-spend-grant/) implements the same mapping in TypeScript.
