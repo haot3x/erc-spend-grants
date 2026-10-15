@@ -9,6 +9,7 @@ The draft is [`ERCS/erc-8427.md`](ERCS/erc-8427.md), under review in [ethereum/E
 - Integration tests: `test/integrations/x402/` settles x402 payments under a registered grant through `SpendGrantAuthorizationExecutor`, with a proposed mapping of x402's payment requirements, payload, and error codes. No change to the draft or the contracts; the tests are not copied into the ERC bundle.
 - The README lists integrations others have built against the reference.
 - Integration tests: `test/integrations/safe/` runs Safe v1.4.1 on Arc testnet against the deployed registry and executor, with a 2-of-3 Safe registering, updating, and revoking as principal and a 2-of-2 Safe authorizing spends as delegate through ERC-1271. It is a fork test; `pnpm test:fork` now runs every `*Fork.t.sol` under `test/`.
+- Integration tests: `test/integrations/erc8004/` grants to an agent's wallet resolved from the ERC-8004 Identity Registry on Arc testnet, and shows that a grant binds the address, not the identity: after `setAgentWallet` or a transfer of the agent, the old wallet spends until the principal revokes, the new wallet fails `UNAUTHORIZED_DELEGATE`, `update` cannot move the grant (`FixedField`), and rebinding is a revocation and a new registration. A salt derived from the identity registry and agent id labels the grant and authorizes nothing. It is a fork test.
 
 ## 2026-10-13
 
