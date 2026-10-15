@@ -11,13 +11,13 @@
     "test": "pnpm test:sol && pnpm test:ts",
     "test:sol": "forge test",
     "test:fork": "FORK_TESTS=true forge test --match-path 'test/**/*Fork.t.sol'",
-    "test:ts": "pnpm --filter @spend-grants/grants test",
+    "test:ts": "pnpm --filter @spend-grants/grants test && pnpm --filter @spend-grants/x402 test",
     "test:symbolic": "HALMOS_ALLOW_DOWNLOAD=1 FOUNDRY_OUT=out-halmos FOUNDRY_CACHE_PATH=cache-halmos halmos --forge-build-out out-halmos --match-contract '^SpendGrant(Record)?Symbolic$' --loop 4 --solver bitwuzla --solver-timeout-assertion 180000 --storage-layout generic && pnpm run test:symbolic:canary && pnpm run test:symbolic:check-canary",
     "test:symbolic:canary": "HALMOS_ALLOW_DOWNLOAD=1 FOUNDRY_OUT=out-halmos FOUNDRY_CACHE_PATH=cache-halmos halmos --forge-build-out out-halmos --match-contract '^SpendGrantRecordCanary$' --match-test CANARY --loop 4 --solver bitwuzla --storage-layout generic 2>&1 | grep -q 'FAIL.*check_CANARY_writeBranchIsReached'",
     "test:symbolic:check-canary": "HALMOS_ALLOW_DOWNLOAD=1 FOUNDRY_OUT=out-halmos FOUNDRY_CACHE_PATH=cache-halmos halmos --forge-build-out out-halmos --match-contract '^SpendGrantCheckCanary$' --match-test CANARY --loop 4 --solver bitwuzla --storage-layout generic 2>&1 | grep -q 'FAIL.*check_CANARY_okBranchIsReached'",
     "analyze": "aderyn . --src src -o aderyn-report.md",
     "check": "forge fmt --check && forge lint && pnpm test && pnpm typecheck && pnpm erc:check",
-    "typecheck": "pnpm --filter @spend-grants/grants typecheck",
+    "typecheck": "pnpm --filter @spend-grants/grants typecheck && pnpm --filter @spend-grants/x402 typecheck",
     "erc:promote": "node scripts/erc-promote.mjs",
     "erc:check": "node scripts/erc-promote.mjs --check"
   }
